@@ -247,4 +247,8 @@ group("lynx_native") {
   if (enable_recorder) {
     deps += [ "services/recorder:recorder" ]
   }
+
+  if (enable_wasmr) {
+    deps += [ "runtime/wasmr:wasmr" ]
+  }
 }

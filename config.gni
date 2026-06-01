@@ -57,6 +57,10 @@ declare_args() {
   # enable_lepusng_worklet corresponds the macro of ENABLE_LEPUSNG_WORKLET
   enable_lepusng_worklet = false
 
+  # Whether to build the WAMR fast-interpreter runtime.
+  enable_wasmr =
+      !is_harmony && (is_android || is_ios || is_mac || is_linux || is_win)
+
   # enable_inspector corresponds the macro of ENABLE_INSPECTOR
   enable_inspector = false
 

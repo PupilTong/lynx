@@ -1,0 +1,275 @@
+# Copyright 2026 The Lynx Authors. All rights reserved.
+# Licensed under the Apache License Version 2.0 that can be found in the
+# LICENSE file in the root directory of this source tree.
+
+import("../../config.gni")
+
+_wasmr_root = "src"
+_wasmr_core = "$_wasmr_root/core"
+_wasmr_iwasm = "$_wasmr_core/iwasm"
+_wasmr_shared = "$_wasmr_core/shared"
+
+config("wasmr_public_config") {
+  include_dirs = [ "$_wasmr_iwasm/include" ]
+}
+
+if (enable_wasmr) {
+  _wasmr_platform = ""
+  _wasmr_platform_defines = []
+  _wasmr_platform_memory_sources = []
+  _wasmr_platform_sources = []
+  _wasmr_platform_libs = []
+
+  if (is_android) {
+    _wasmr_platform = "android"
+    _wasmr_platform_defines = [
+      "BH_PLATFORM_ANDROID",
+      "WASM_HAVE_MREMAP=0",
+    ]
+    _wasmr_platform_memory_sources =
+        [ "$_wasmr_shared/platform/common/memory/mremap.c" ]
+    _wasmr_platform_sources =
+        [ "$_wasmr_shared/platform/android/platform_init.c" ]
+    _wasmr_platform_libs = [ "log" ]
+  } else if (is_mac || is_ios) {
+    _wasmr_platform = "darwin"
+    _wasmr_platform_defines = [
+      "BH_PLATFORM_DARWIN",
+      "WASM_HAVE_MREMAP=0",
+    ]
+    _wasmr_platform_memory_sources =
+        [ "$_wasmr_shared/platform/common/memory/mremap.c" ]
+    _wasmr_platform_sources =
+        [ "$_wasmr_shared/platform/darwin/platform_init.c" ]
+  } else if (is_linux) {
+    _wasmr_platform = "linux"
+    _wasmr_platform_defines = [
+      "BH_PLATFORM_LINUX",
+      "WASM_HAVE_MREMAP=1",
+      "_GNU_SOURCE",
+    ]
+    _wasmr_platform_sources =
+        [ "$_wasmr_shared/platform/linux/platform_init.c" ]
+  } else if (is_win) {
+    _wasmr_platform = "windows"
+    _wasmr_platform_defines = [
+      "BH_PLATFORM_WINDOWS",
+      "COMPILING_WASM_RUNTIME_API=1",
+      "HAVE_STRUCT_TIMESPEC",
+      "WASM_HAVE_MREMAP=0",
+      "_WINSOCK_DEPRECATED_NO_WARNINGS",
+    ]
+    _wasmr_platform_memory_sources =
+        [ "$_wasmr_shared/platform/common/memory/mremap.c" ]
+    _wasmr_platform_sources = [
+      "$_wasmr_shared/platform/windows/platform_init.c",
+      "$_wasmr_shared/platform/windows/win_atomic.cpp",
+      "$_wasmr_shared/platform/windows/win_clock.c",
+      "$_wasmr_shared/platform/windows/win_file.c",
+      "$_wasmr_shared/platform/windows/win_malloc.c",
+      "$_wasmr_shared/platform/windows/win_memmap.c",
+      "$_wasmr_shared/platform/windows/win_socket.c",
+      "$_wasmr_shared/platform/windows/win_thread.c",
+      "$_wasmr_shared/platform/windows/win_time.c",
+      "$_wasmr_shared/platform/windows/win_util.c",
+    ]
+    _wasmr_platform_libs = [ "ws2_32.lib" ]
+  }
+
+  assert(
+      _wasmr_platform != "",
+      "enable_wasmr is only supported on Android, Darwin, Linux, and Windows.")
+
+  _wasmr_target_defines = []
+  _wasmr_invoke_native_source = ""
+  if (is_win) {
+    _wasmr_windows_invoke_native_source =
+        "$_wasmr_iwasm/common/arch/invokeNative_general.c"
+  }
+  if (target_cpu == "arm64") {
+    _wasmr_target_defines = [
+      "BUILD_TARGET_AARCH64",
+      "BUILD_TARGET=\"AARCH64\"",
+    ]
+    _wasmr_invoke_native_source =
+        "$_wasmr_iwasm/common/arch/invokeNative_aarch64.s"
+  } else if (target_cpu == "arm") {
+    _wasmr_target_defines = [
+      "BUILD_TARGET_ARM",
+      "BUILD_TARGET=\"ARM\"",
+    ]
+    _wasmr_invoke_native_source = "$_wasmr_iwasm/common/arch/invokeNative_arm.s"
+  } else if (target_cpu == "x64") {
+    _wasmr_target_defines = [
+      "BUILD_TARGET_X86_64",
+      "BUILD_TARGET=\"X86_64\"",
+    ]
+    _wasmr_invoke_native_source =
+        "$_wasmr_iwasm/common/arch/invokeNative_em64.s"
+    if (is_win) {
+      _wasmr_windows_invoke_native_source =
+          "$_wasmr_iwasm/common/arch/invokeNative_em64.asm"
+    }
+  } else if (target_cpu == "x86") {
+    _wasmr_target_defines = [
+      "BUILD_TARGET_X86_32",
+      "BUILD_TARGET=\"X86_32\"",
+    ]
+    _wasmr_invoke_native_source =
+        "$_wasmr_iwasm/common/arch/invokeNative_ia32.s"
+    if (is_win) {
+      _wasmr_windows_invoke_native_source =
+          "$_wasmr_iwasm/common/arch/invokeNative_ia32.asm"
+    }
+  } else if (target_cpu == "riscv64") {
+    _wasmr_target_defines = [ "BUILD_TARGET_RISCV64_LP64D" ]
+    _wasmr_invoke_native_source =
+        "$_wasmr_iwasm/common/arch/invokeNative_riscv.S"
+  }
+
+  assert(_wasmr_invoke_native_source != "",
+         "enable_wasmr does not support target_cpu=$target_cpu.")
+
+  config("wasmr_private_config") {
+    include_dirs = [
+      "$_wasmr_iwasm/interpreter",
+      "$_wasmr_iwasm/libraries/libc-builtin",
+      "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/include",
+      "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/src",
+      "$_wasmr_iwasm/common",
+      "$_wasmr_shared/mem-alloc",
+      "$_wasmr_shared/platform/$_wasmr_platform",
+      "$_wasmr_shared/platform/include",
+      "$_wasmr_shared/platform/common/libc-util",
+      "$_wasmr_shared/utils",
+    ]
+
+    defines = [
+                "BH_FREE=wasm_runtime_free",
+                "BH_MALLOC=wasm_runtime_malloc",
+                "WASM_CONFIGURABLE_BOUNDS_CHECKS=0",
+                "WASM_DISABLE_HW_BOUND_CHECK=0",
+                "WASM_DISABLE_STACK_HW_BOUND_CHECK=0",
+                "WASM_DISABLE_WAKEUP_BLOCKING_OP=0",
+                "WASM_DISABLE_WRITE_GS_BASE=1",
+                "WASM_ENABLE_AOT=0",
+                "WASM_ENABLE_AOT_INTRINSICS=0",
+                "WASM_ENABLE_BULK_MEMORY=1",
+                "WASM_ENABLE_BULK_MEMORY_OPT=1",
+                "WASM_ENABLE_CALL_INDIRECT_OVERLONG=1",
+                "WASM_ENABLE_EXTENDED_CONST_EXPR=0",
+                "WASM_ENABLE_FAST_INTERP=1",
+                "WASM_ENABLE_FAST_JIT=0",
+                "WASM_ENABLE_GC=0",
+                "WASM_ENABLE_INTERP=1",
+                "WASM_ENABLE_JIT=0",
+                "WASM_ENABLE_LAZY_JIT=0",
+                "WASM_ENABLE_LIBC_BUILTIN=1",
+                "WASM_ENABLE_LIBC_WASI=1",
+                "WASM_ENABLE_LIB_PTHREAD=0",
+                "WASM_ENABLE_LIB_WASI_THREADS=0",
+                "WASM_ENABLE_MEMORY64=0",
+                "WASM_ENABLE_MINI_LOADER=0",
+                "WASM_ENABLE_MODULE_INST_CONTEXT=1",
+                "WASM_ENABLE_MULTI_MEMORY=0",
+                "WASM_ENABLE_MULTI_MODULE=0",
+                "WASM_ENABLE_QUICK_AOT_ENTRY=0",
+                "WASM_ENABLE_REF_TYPES=1",
+                "WASM_ENABLE_SHARED_MEMORY=0",
+                "WASM_ENABLE_SHRUNK_MEMORY=1",
+                "WASM_ENABLE_SIMD=0",
+                "WASM_ENABLE_SIMDE=0",
+                "WASM_ENABLE_THREAD_MGR=0",
+                "WASM_GLOBAL_HEAP_SIZE=10485760",
+              ] + _wasmr_platform_defines + _wasmr_target_defines
+
+    cflags = []
+
+    if (!is_win) {
+      cflags += [
+        "-fdata-sections",
+        "-ffunction-sections",
+        "-Wno-sign-compare",
+        "-Wno-unused-function",
+        "-Wno-unused-parameter",
+        "-Wno-unused-variable",
+      ]
+      if (!is_android) {
+        cflags += [ "-Wno-cast-function-type" ]
+      } else {
+        cflags += [ "-Wno-newline-eof" ]
+      }
+      cflags_c = [ "-std=gnu99" ]
+    }
+  }
+
+  source_set("wasmr") {
+    public_configs = [ ":wasmr_public_config" ]
+    configs += [ ":wasmr_private_config" ]
+
+    sources = [
+                "$_wasmr_iwasm/common/wasm_application.c",
+                "$_wasmr_iwasm/common/wasm_blocking_op.c",
+                "$_wasmr_iwasm/common/wasm_c_api.c",
+                "$_wasmr_iwasm/common/wasm_exec_env.c",
+                "$_wasmr_iwasm/common/wasm_loader_common.c",
+                "$_wasmr_iwasm/common/wasm_memory.c",
+                "$_wasmr_iwasm/common/wasm_native.c",
+                "$_wasmr_iwasm/common/wasm_runtime_common.c",
+                "$_wasmr_iwasm/common/wasm_shared_memory.c",
+                "$_wasmr_iwasm/interpreter/wasm_interp_fast.c",
+                "$_wasmr_iwasm/interpreter/wasm_loader.c",
+                "$_wasmr_iwasm/interpreter/wasm_runtime.c",
+                "$_wasmr_iwasm/libraries/libc-builtin/libc_builtin_wrapper.c",
+                "$_wasmr_iwasm/libraries/libc-wasi/libc_wasi_wrapper.c",
+                "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/src/blocking_op.c",
+                "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/src/posix.c",
+                "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/src/random.c",
+                "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/src/str.c",
+                "$_wasmr_shared/mem-alloc/ems/ems_alloc.c",
+                "$_wasmr_shared/mem-alloc/ems/ems_gc.c",
+                "$_wasmr_shared/mem-alloc/ems/ems_hmu.c",
+                "$_wasmr_shared/mem-alloc/ems/ems_kfc.c",
+                "$_wasmr_shared/mem-alloc/mem_alloc.c",
+                "$_wasmr_shared/platform/common/libc-util/libc_errno.c",
+                "$_wasmr_shared/utils/bh_assert.c",
+                "$_wasmr_shared/utils/bh_bitmap.c",
+                "$_wasmr_shared/utils/bh_common.c",
+                "$_wasmr_shared/utils/bh_hashmap.c",
+                "$_wasmr_shared/utils/bh_leb128.c",
+                "$_wasmr_shared/utils/bh_list.c",
+                "$_wasmr_shared/utils/bh_log.c",
+                "$_wasmr_shared/utils/bh_queue.c",
+                "$_wasmr_shared/utils/bh_vector.c",
+                "$_wasmr_shared/utils/runtime_timer.c",
+              ] + _wasmr_platform_memory_sources + _wasmr_platform_sources
+
+    if (is_win) {
+      sources += [ _wasmr_windows_invoke_native_source ]
+    } else {
+      sources += [ _wasmr_invoke_native_source ]
+    }
+
+    if (!is_win) {
+      sources += [
+        "$_wasmr_shared/platform/common/posix/posix_blocking_op.c",
+        "$_wasmr_shared/platform/common/posix/posix_clock.c",
+        "$_wasmr_shared/platform/common/posix/posix_file.c",
+        "$_wasmr_shared/platform/common/posix/posix_malloc.c",
+        "$_wasmr_shared/platform/common/posix/posix_memmap.c",
+        "$_wasmr_shared/platform/common/posix/posix_sleep.c",
+        "$_wasmr_shared/platform/common/posix/posix_socket.c",
+        "$_wasmr_shared/platform/common/posix/posix_thread.c",
+        "$_wasmr_shared/platform/common/posix/posix_time.c",
+      ]
+    }
+
+    libs = _wasmr_platform_libs
+
+    configs -= [ "//build/config/compiler:chromium_code" ]
+    configs += [ "//build/config/compiler:no_chromium_code" ]
+  }
+} else {
+  group("wasmr") {
+  }
+}

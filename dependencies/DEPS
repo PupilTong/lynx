@@ -217,6 +217,13 @@ deps = {
         "commit": "2588054ab58e40ac31f23c74d41569880cca8fbd",
         "ignore_in_git": True,
     },
+    "third_party/wasmr/src": {
+        "type": "git",
+        "url": "https://github.com/PupilTong/wasm-micro-runtime.git",
+        "commit": "2b25b20474eaf85e1358f9b795de6b2da267cb7a",
+        "ignore_in_git": True,
+        "enable_lfs": False,
+    },
     "third_party/debug_router/src": {
         'type': 'git',
         'url': 'https://github.com/lynx-family/debug-router.git',
