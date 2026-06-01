@@ -35,6 +35,17 @@ class TemplateResourceCallback extends GuardedResourceCallback {
     return this.mResourceType;
   }
 
+  private static boolean hasWamrWasmBytecodeMagic(byte[] data) {
+    return data != null && data.length >= 4 && data[0] == 0 && data[1] == 'a'
+        && data[2] == 's' && data[3] == 'm';
+  }
+
+  private static boolean hasWamrWasmBytecodeMagic(ByteBuffer buffer) {
+    return buffer != null && buffer.limit() >= 4 && buffer.get(0) == 0
+        && buffer.get(1) == 'a' && buffer.get(2) == 's'
+        && buffer.get(3) == 'm';
+  }
+
   public void onTemplateLoaded(
       boolean success, byte[] data, TemplateBundle bundle, ByteBuffer buffer, String errorMsg) {
     if (!EnsureInvokedOnce()) {
@@ -44,6 +55,16 @@ class TemplateResourceCallback extends GuardedResourceCallback {
     // Report only when loading async component data success
     final boolean dataValid = data != null && data.length > 0;
     final boolean bundleValid = bundle != null && bundle.isValid();
+    // WAMR detects supported WASM bytecode from magic bytes instead of file
+    // names: "\0asm".
+    final boolean wamrWasmBytecode = success && !bundleValid
+        && (hasWamrWasmBytecodeMagic(data) || hasWamrWasmBytecodeMagic(buffer));
+    if (wamrWasmBytecode) {
+      LynxResourceLoader.nativeInvokeCallback(mResponseHandler, data, 0L, buffer,
+          LynxResourceLoader.RESOURCE_LOADER_SUCCESS, errorMsg);
+      return;
+    }
+
     if (success && (dataValid || bundleValid) && mReportHelper != null) {
       mReportHelper.reportLynxCrashContext(LynxInfoReportHelper.KEY_ASYNC_COMPONENT_URL, mUrl);
     }
