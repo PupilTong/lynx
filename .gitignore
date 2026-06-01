@@ -3,6 +3,7 @@
 /build
 /buildtools
 /third_party/quickjs/src
+/third_party/wasmr/src
 /third_party/libcxx
 /third_party/v8
 /third_party/libcxxabi

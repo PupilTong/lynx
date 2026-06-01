@@ -39,6 +39,10 @@ lynx_core_source_set("runtime") {
 
   deps += runtime_extend_deps
 
+  if (enable_wasmr) {
+    deps += [ "wasmr" ]
+  }
+
   if (is_android || is_ios || is_win || is_mac || enable_unittests) {
     deps += [ "profile/v8:v8_profile" ]
   }
