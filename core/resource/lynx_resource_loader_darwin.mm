@@ -28,6 +28,21 @@ static NSString* const kLoadScriptMethodName = @"LoadScript";
 static NSString* const kLoadLocalScriptMethodName = @"LoadLocalScript";
 static NSString* const kNullDataMsg = @"response with null data";
 
+bool HasWamrWasmBytecodeMagic(const uint8_t* data, size_t size) {
+  return data != nullptr && size >= 4 && data[0] == '\0' && data[1] == 'a' &&
+         data[2] == 's' && data[3] == 'm';
+}
+
+bool HasWamrWasmBytecodeMagic(const std::vector<uint8_t>& data) {
+  return HasWamrWasmBytecodeMagic(data.data(), data.size());
+}
+
+bool HasWamrWasmBytecodeMagic(NSData* data) {
+  return data != nil &&
+         HasWamrWasmBytecodeMagic(static_cast<const uint8_t*>(data.bytes),
+                                  data.length);
+}
+
 void ReportError(__weak id<LynxErrorReceiverProtocol> weakErrorReceiver, NSString* methodName,
                  NSString* url, NSInteger code, NSString* errorMsg, NSString* rootCause) {
   dispatch_async(dispatch_get_main_queue(), ^() {
@@ -53,6 +68,11 @@ void VerifyLynxTemplateResource(const std::string& url, lynx::pub::LynxResourceR
   // verify only when data valid;
   if (response.Success()) {
     if (response.bundle != nullptr) {
+      return;
+    }
+    // WAMR detects supported WASM bytecode from magic bytes instead of file
+    // names: "\0asm".
+    if (HasWamrWasmBytecodeMagic(response.data)) {
       return;
     }
     if (!response.data.empty()) {
@@ -234,7 +254,7 @@ bool LynxResourceLoaderDarwin::FetchTemplateByFetcherWrapper(const std::string& 
       invoked = YES;
     }
 
-    if (!error && data.length > 0) {
+    if (!error && data.length > 0 && !HasWamrWasmBytecodeMagic(data)) {
       [LynxService(LynxServiceMonitorProtocol)
           reportErrorGlobalContextTag:LynxContextTagLastLynxAsyncComponentURL
                                  data:[NSString
