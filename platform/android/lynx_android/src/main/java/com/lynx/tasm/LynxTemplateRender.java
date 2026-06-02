@@ -266,6 +266,7 @@ public class LynxTemplateRender
       LynxEnv.inst().enableSkipUpdateViewportOnInitWhenMeasureSpecEmpty();
 
   private boolean mEnableJSRuntime;
+  private boolean mIsWasmTemplate;
 
   private boolean mEnableAirStrictMode;
 
@@ -973,10 +974,10 @@ public class LynxTemplateRender
     mLoader = new LynxResourceLoader(null, mLynxViewBuilder.fetcher, this,
         mLynxContext.getTemplateResourceFetcher(), mLynxContext.getGenericResourceFetcher());
     mLynxContext.setEnableAutoExpose(mLynxViewConfigProvider.isEnableAutoExpose());
-    mNativeFacade = new NativeFacade(mLynxViewBuilder.isEnableJSRuntime());
+    mNativeFacade = new NativeFacade(mEnableJSRuntime);
     mNativeFacade.setCallback(new TASMCallback());
     DisplayMetrics screenMetrics = mLynxContext.getScreenMetrics();
-    long runtimeWrapperPtr = (mRuntime == null) ? 0 : mRuntime.getNativePtr();
+    long runtimeWrapperPtr = (mRuntime == null || mIsWasmTemplate) ? 0 : mRuntime.getNativePtr();
     long whiteBoardPtr = (mGroup == null) ? 0 : mGroup.getWhiteBoardPtr();
 
     ILynxUIRenderer lynxUIRenderer = lynxUIRenderer();
@@ -986,20 +987,27 @@ public class LynxTemplateRender
     TasmPlatformInvoker tasmPlatformInvoker = tasmPlatformInvoker();
     boolean enableVSyncAligned = mLynxViewConfigProvider.isEnableVSyncAlignedMessageLoop()
         || LynxEnv.inst().enableVSyncAlignedMessageLoopGlobal();
-    setUpMainThreadModuleFactory();
+    boolean enableLogicExecutor = mLogicExecutor != null && !mIsWasmTemplate;
+    boolean enableJSGroupThread =
+        !mIsWasmTemplate && mGroup != null && mGroup.enableJSGroupThread();
+    if (mIsWasmTemplate) {
+      mMainThreadModuleFactory = null;
+    } else {
+      setUpMainThreadModuleFactory();
+    }
     mNativePtr = nativeCreate(runtimeWrapperPtr, mNativeFacade,
         mPerformanceController.isEmbeddedMode() ? null : mPerformanceController, mLoader,
         mThreadStrategyForRendering.id(), mLynxViewConfigProvider.isEnableLayoutSafepoint(),
         mLynxViewBuilder.enableLayoutOnly, screenMetrics.widthPixels, screenMetrics.heightPixels,
-        screenMetrics.density, LynxEnv.inst().getLocale(), mLynxViewBuilder.isEnableJSRuntime(),
+        screenMetrics.density, LynxEnv.inst().getLocale(), mEnableJSRuntime,
         mLynxViewConfigProvider.isEnableMultiAsyncThread(),
         mLynxViewConfigProvider.isEnablePreUpdateData(), enableVSyncAligned,
         mLynxViewConfigProvider.isEnableAsyncHydration(),
-        mGroup != null && mGroup.enableJSGroupThread(), getJSGroupThreadNameIfNeed(),
+        enableJSGroupThread, enableJSGroupThread ? getJSGroupThreadNameIfNeed() : "",
         tasmPlatformInvoker, whiteBoardPtr, lynxUIRenderer.getUIDelegatePtr(),
         lynxUIRenderer.useInvokeUIMethod(), mLongTaskMonitorEnabled == LynxBooleanOption.FALSE,
         mForceLayoutOnBackgroundThread, mLynxViewConfigProvider.isEnableUnifiedPipeline(),
-        mEmbeddedMode, mLogicExecutor != null, mLynxViewBuilder.isDebuggable(),
+        mEmbeddedMode, enableLogicExecutor, mLynxViewBuilder.isDebuggable(),
         mLynxEngineRef == null ? 0 : mLynxEngineRef.getNativePtr(),
         mMainThreadModuleFactory != null ? mMainThreadModuleFactory : null);
 
@@ -1047,7 +1055,7 @@ public class LynxTemplateRender
       LynxEventReporter.moveExtraParams(lastInstanceId, mLynxContext.getInstanceId());
     }
 
-    if (null != mLynxContext && mLogicExecutor == null) {
+    if (null != mLynxContext && mLogicExecutor == null && !mIsWasmTemplate) {
       // init LynxRuntime If LogicExecutor is not provided.
       setUpBackgroundThreadModuleFactory();
       mResourceLoader = new LynxResourceLoader(mLynxRuntimeOptions, mLynxViewBuilder.fetcher, this,
@@ -1099,8 +1107,10 @@ public class LynxTemplateRender
   }
 
   private void setUpExtensionModules() {
-    if (!mLynxViewBuilder.isEnableJSRuntime()) {
-      LLog.e(TAG, "setUpExtensionModules failed, isEnableJSRuntime is false");
+    if (!mEnableJSRuntime) {
+      if (!mIsWasmTemplate) {
+        LLog.e(TAG, "setUpExtensionModules failed, isEnableJSRuntime is false");
+      }
       return;
     }
     Map<String, LynxExtensionModule> modules = mLynxContext.getExtensionModules();
@@ -1117,8 +1127,10 @@ public class LynxTemplateRender
   }
 
   private void notifyExtensionModulesTemplateLoad(String url) {
-    if (!mLynxViewBuilder.isEnableJSRuntime()) {
-      LLog.e(TAG, "notifyExtensionModulesTemplateLoad failed, isEnableJSRuntime is false");
+    if (!mEnableJSRuntime) {
+      if (!mIsWasmTemplate) {
+        LLog.e(TAG, "notifyExtensionModulesTemplateLoad failed, isEnableJSRuntime is false");
+      }
       return;
     }
     Map<String, LynxExtensionModule> modules = mLynxContext.getExtensionModules();
@@ -1466,6 +1478,16 @@ public class LynxTemplateRender
     notifyExtensionModulesTemplateLoad(url);
   }
 
+  private void updateJSRuntimeForTemplate(@Nullable LynxLoadMeta metaData) {
+    mIsWasmTemplate = metaData != null && !metaData.isBundleValid()
+        && WamrWasmBytecodeUtils.hasWamrWasmBytecodeMagic(
+            metaData.binaryData, metaData.byteBuffer);
+    mEnableJSRuntime = mLynxViewConfigProvider.isEnableJSRuntime() && !mIsWasmTemplate;
+    if (mIsWasmTemplate && mNativePtr != 0) {
+      reload = true;
+    }
+  }
+
   private void prepareLynxEngineIfNeeded() {
     if (!checkIfEnvPrepared()) {
       onErrorOccurred(LynxSubErrorCode.E_APP_BUNDLE_LOAD_ENV_NOT_READY,
@@ -1551,6 +1573,8 @@ public class LynxTemplateRender
       return;
     }
 
+    updateJSRuntimeForTemplate(null);
+
     if (mEnableReuseEngine) {
       if (tryRenderByReuseLynxRender(templateData)) {
         return;
@@ -1587,6 +1611,7 @@ public class LynxTemplateRender
     }
     String eventName = "LynxTemplateRender.loadTemplateWithMeta";
     onTraceEventBegin(eventName);
+    updateJSRuntimeForTemplate(metaData);
     if ((!mAsyncRender || reload) && !UIThreadUtils.isOnUiThread()) {
       UIThreadUtils.runOnUiThread(new Runnable() {
         @Override
@@ -1713,12 +1738,14 @@ public class LynxTemplateRender
       return;
     }
 
+    updateJSRuntimeForTemplate(metaData);
+
     if (mLogicExecutor != null && metaData.getInitialData() != null) {
       metaData.getInitialData().setEnableJSData(false);
       mTemplateData.updateWithTemplateData(metaData.getInitialData());
     }
 
-    if (mEnableReuseEngine || mEnableCacheEngine) {
+    if ((mEnableReuseEngine || mEnableCacheEngine) && !mIsWasmTemplate) {
       if (tryRenderByReuseLynxRender(metaData.initialData)) {
         return;
       }
@@ -3429,7 +3456,7 @@ public class LynxTemplateRender
   }
 
   public void startLynxRuntime() {
-    if (mNativePtr != 0) {
+    if (mNativePtr != 0 && !mIsWasmTemplate) {
       // Once LynxView starts its LynxRuntime, user expects that
       // LynxRuntime is always running, reload/load operations
       // on such LynxView shouldn't enable PendingJsTask.

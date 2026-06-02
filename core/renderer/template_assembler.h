@@ -566,6 +566,9 @@ class TemplateAssembler final : public TemplateEntryHolder,
   }
 
   bool ShouldPostDataToJs() const {
+    if (is_wasm_template_) {
+      return false;
+    }
     // currently, only air&air_fiber mode should not post data to js
     // Or EmbeddedMode is On, but logic executor has not been set.
     if (page_config_) {
@@ -1082,6 +1085,7 @@ class TemplateAssembler final : public TemplateEntryHolder,
   bool is_loading_template_;
   bool enable_pre_update_data_{false};
   bool pre_painting_{false};
+  bool is_wasm_template_{false};
 };
 }  // namespace tasm
 }  // namespace lynx
