@@ -117,6 +117,9 @@ class MTSRuntime : private MTSContextHolder {
   // Execute with optional bundle info (e.g. bundleId for RTSNative).
   bool Execute(const ContextBundle* bundle);
 
+  bool ExecuteWasm(const std::vector<uint8_t>& module, const std::string& url,
+                   std::string* error_msg);
+
   // only for main bundle
   bool TryExecute();
 

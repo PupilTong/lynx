@@ -84,6 +84,10 @@ class TemplateEntry : public VmContextHolder, public CSSStyleSheetDelegate {
   bool InitWithPageConfigger(PageConfigger* page_configger,
                              const PageOptions& page_options = PageOptions());
 
+  bool InitWithWasmTemplate(TemplateAssembler* assembler,
+                            PageConfigger* page_configger,
+                            const PageOptions& page_options = PageOptions());
+
   bool ConstructContext(TemplateAssembler* assembler, bool is_lepusng_binary,
                         const runtime::ContextBundle& context_bundle,
                         bool use_context_pool = false,

@@ -342,6 +342,48 @@ bool TemplateEntry::InitLepusContext(
   return true;
 }
 
+bool TemplateEntry::InitWithWasmTemplate(
+    TemplateAssembler* assembler, PageConfigger* page_configger,
+    const PageOptions& page_options) {
+  auto page_config = page_configger->GetPageConfig();
+  if (!page_config) {
+    page_config = std::make_shared<PageConfig>();
+    page_configger->SetPageConfig(page_config);
+  }
+  page_config->SetEnableLepusNG(true);
+  page_config->SetEnableFiberArch(true);
+  page_config->SetLynxAirMode(CompileOptionAirMode::AIR_MODE_FIBER);
+
+  if (is_card_) {
+    page_configger->SetSupportComponentJS(false);
+    page_configger->SetTargetSdkVersion(page_config->GetTargetSDKVersion());
+  }
+
+  SetCircularDataCheck(page_config->GetGlobalCircularDataCheck());
+  SetEnableJsBindingApiThrowException(
+      page_config->GetEnableJsBindingApiThrowException());
+
+  if (!vm_context_) {
+    uint32_t mode = tasm::performance::MemoryMonitor::ScriptingEngineMode();
+    vm_context_ = runtime::MTSRuntime::CreateContext(
+        runtime::ContextType::LepusNGContextType,
+        page_config->GetDisableQuickTracingGC(), mode, page_options);
+  }
+  if (!vm_context_) {
+    error_msg_ = "WASM template context construct failed";
+    return false;
+  }
+
+  vm_context_->SetSdkVersion(assembler->target_sdk_version_);
+  vm_context_->Initialize();
+  SetName(DEFAULT_ENTRY_NAME);
+  SetTemplateAssembler(assembler);
+  RegisterBuiltin();
+  vm_context_->RegisterLynx(page_config->GetEnableSignalAPIBoolValue());
+  ApplyConfigsToLepusContext(page_config);
+  return true;
+}
+
 std::shared_ptr<PageConfig> TemplateEntry::EnsurePageConfig(
     PageConfigger* configger) const {
   if (is_card_) {

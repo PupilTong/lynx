@@ -3628,6 +3628,20 @@ public class LynxTemplateRender
         timingOption, callback);
   }
 
+  private static boolean hasWamrWasmBytecodeMagic(byte[] data) {
+    return data != null && data.length >= 4 && data[0] == 0 && data[1] == 'a'
+        && data[2] == 's' && data[3] == 'm';
+  }
+
+  private static boolean hasWamrWasmBytecodeMagic(ByteBuffer buffer) {
+    return buffer != null && buffer.limit() >= 4 && buffer.get(0) == 0
+        && buffer.get(1) == 'a' && buffer.get(2) == 's' && buffer.get(3) == 'm';
+  }
+
+  private static boolean isWamrWasmBytecode(byte[] template, ByteBuffer buffer) {
+    return hasWamrWasmBytecodeMagic(template) || hasWamrWasmBytecodeMagic(buffer);
+  }
+
   private void loadTemplateBundle(TemplateBundle bundle, String url, TemplateData initData,
       boolean isPrePainting, int options, NativeFacade.Callback callback,
       TimingOption timingOption) {
@@ -3714,7 +3728,7 @@ public class LynxTemplateRender
 
     ILynxSecurityService securityService =
         LynxServiceCenter.inst().getService(ILynxSecurityService.class);
-    if (securityService != null) {
+    if (securityService != null && !isWamrWasmBytecode(template, buffer)) {
       // Do Security Check;
       timingOption.markTiming(TimingConstants.VERIFY_TASM_START);
       SecurityResult result = securityService.verifyTASM(

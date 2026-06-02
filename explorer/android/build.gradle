@@ -154,8 +154,9 @@ task buildHomePage {
         from "../homepage/dist/"
         into "lynx_explorer/src/main/assets"
         include 'main.lynx.bundle'
+        include 'main.wasm'
         rename { String fileName ->
-            'homepage.lynx.bundle'
+            fileName == 'main.wasm' ? 'homepage.wasm' : 'homepage.lynx.bundle'
         }
     }
 }

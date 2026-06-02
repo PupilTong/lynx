@@ -96,7 +96,7 @@ for path in os.listdir(node_modules_example_dir):
 
     dist_dir = os.path.join(node_modules_example_dir, path, "dist")
     for filename in os.listdir(dist_dir):
-        if filename.endswith(".lynx.bundle"):
+        if filename.endswith(".lynx.bundle") or filename.endswith(".wasm"):
             shutil.copy(os.path.join(dist_dir, filename), path_android)
             shutil.copy(os.path.join(dist_dir, filename), path_ios)
             shutil.copy(os.path.join(dist_dir, filename), path_harmony)
@@ -119,7 +119,7 @@ os.makedirs(menu_harmony)
 os.makedirs(menu_windows)
 os.makedirs(menu_macos)
 for filename in os.listdir(menu_dist_dir):
-    if filename.endswith(".lynx.bundle"):
+    if filename.endswith(".lynx.bundle") or filename.endswith(".wasm"):
         shutil.copy(os.path.join(menu_dist_dir, filename), menu_android)
         shutil.copy(os.path.join(menu_dist_dir, filename), menu_ios)
         shutil.copy(os.path.join(menu_dist_dir, filename), menu_harmony)

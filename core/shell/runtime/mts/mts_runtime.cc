@@ -23,6 +23,10 @@
 #include "core/runtime/mts_context_factory.h"
 #include "core/template_bundle/template_codec/binary_decoder/lynx_config_constant_auto_gen.h"
 
+#if ENABLE_WASMR
+#include "core/runtime/wasmr/wasmr_runner.h"
+#endif
+
 namespace lynx {
 namespace runtime {
 
@@ -134,6 +138,25 @@ bool MTSRuntime::Execute(const ContextBundle* bundle) {
 
   EnsureLynx();
   return mts_context_->ExecuteBinaryWithBundle(bundle, nullptr);
+}
+
+bool MTSRuntime::ExecuteWasm(const std::vector<uint8_t>& module,
+                             const std::string& url,
+                             std::string* error_msg) {
+#if ENABLE_WASMR
+  if (HasPreExecuteSuccess()) {
+    ResetPreExecuteSuccess();
+  }
+  ScriptingScope scope(this);
+  EnsureLynx();
+  return wasmr::ExecuteWasmModule(module.data(), module.size(),
+                                  mts_context_.get(), url, error_msg);
+#else
+  if (error_msg != nullptr) {
+    *error_msg = "WAMR is disabled in this build";
+  }
+  return false;
+#endif
 }
 
 void MTSRuntime::EnsureLynx() {
