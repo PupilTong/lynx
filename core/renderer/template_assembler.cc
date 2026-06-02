@@ -46,6 +46,7 @@
 #include "core/resource/lazy_bundle/lazy_bundle_loader.h"
 #include "core/resource/lazy_bundle/lazy_bundle_utils.h"
 #include "core/resource/trace/resource_trace_event_def.h"
+#include "core/resource/wasm_bytecode_utils.h"
 #include "core/runtime/common/bindings/event/message_event.h"
 #include "core/runtime/common/js_error_reporter.h"
 #include "core/runtime/js/bindings/api_call_back.h"
@@ -82,11 +83,6 @@ namespace {
 constexpr char kNetworkSuggestion[] =
     "Please refer to the error message, or seek help from resource loader.";
 constexpr const static char* kTemplateJSSizeOfGenericInfo = "template_js_size";
-
-bool HasWamrWasmBytecodeMagic(const std::vector<uint8_t>& data) {
-  return data.size() >= 4 && data[0] == 0 && data[1] == 'a' &&
-         data[2] == 's' && data[3] == 'm';
-}
 
 std::string ConstructDecodeErrorMessage(bool is_card, const std::string& url,
                                         const std::string& error_msg) {
