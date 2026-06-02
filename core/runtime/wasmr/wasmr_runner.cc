@@ -76,14 +76,14 @@ bool CallWasmFunction(wasm_module_inst_t module_inst, wasm_exec_env_t exec_env,
 bool ExecuteExportedEntry(wasm_module_inst_t module_inst,
                           wasm_exec_env_t exec_env, std::string* error_msg) {
   wasm_function_inst_t wasi_start =
-      wasm_runtime_lookup_function(module_inst, "_start", nullptr);
+      wasm_runtime_lookup_function(module_inst, "_start");
   if (wasi_start != nullptr) {
     return CallWasmFunction(module_inst, exec_env, wasi_start, "_start",
                             error_msg);
   }
 
   wasm_function_inst_t ctor =
-      wasm_runtime_lookup_function(module_inst, "__wasm_call_ctors", nullptr);
+      wasm_runtime_lookup_function(module_inst, "__wasm_call_ctors");
   if (ctor != nullptr &&
       !CallWasmFunction(module_inst, exec_env, ctor, "__wasm_call_ctors",
                         error_msg)) {
@@ -93,7 +93,7 @@ bool ExecuteExportedEntry(wasm_module_inst_t module_inst,
   constexpr std::array<const char*, 2> kEntryNames = {"__start", "start"};
   for (const char* entry_name : kEntryNames) {
     wasm_function_inst_t entry =
-        wasm_runtime_lookup_function(module_inst, entry_name, nullptr);
+        wasm_runtime_lookup_function(module_inst, entry_name);
     if (entry == nullptr) {
       continue;
     }
