@@ -47,7 +47,7 @@ public class DemoTemplateResourceFetcher extends LynxTemplateResourceFetcher {
 
     String url = request.getUrl();
     if (LynxViewShellActivity.isAssetFilename(url)) {
-      url = LynxViewShellActivity.getAssetFilePath(url);
+      url = LynxViewShellActivity.getAssetFilename(url);
       readBundleFromAssets(url, callback);
       return;
     }

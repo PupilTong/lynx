@@ -52,9 +52,6 @@ public class LynxViewShellActivity extends AppCompatActivity {
   public static final String URL_KEY = "url";
   public static final String PREFERENCES = "ExplorerStorage";
   private static final String URL_PREFIX = "file://lynx?local://";
-  private static final String ASSET_URL_PREFIX = "assets://";
-  private static final String LYNX_BUNDLE_SUFFIX = ".lynx.bundle";
-  private static final String WASM_SUFFIX = ".wasm";
   private static final String TAG = "LynxViewShellActivity";
   private static final String HOME_PAGE_URL =
       "file://lynx?local://homepage.lynx.bundle?fullscreen=true&orientation=portrait";
@@ -295,7 +292,16 @@ public class LynxViewShellActivity extends AppCompatActivity {
 
     if (isAssetFilename(url)) {
       // get file from asset
-      url = getAssetFilePath(url);
+      url = getAssetFilename(url);
+      // parse url
+      String[] strs = url.split("[?]");
+      if (strs.length > 1) {
+        url = strs[0];
+      }
+      strs = url.split("[&]");
+      if (strs.length > 1) {
+        url = strs[0];
+      }
       byte[] templateBundleData = readFileFromAssets(this, url);
       extraTimingInfo.mPrepareTemplateEnd = System.currentTimeMillis();
       lynxView.setExtraTiming(extraTimingInfo);
@@ -304,6 +310,12 @@ public class LynxViewShellActivity extends AppCompatActivity {
       extraTimingInfo.mPrepareTemplateEnd = System.currentTimeMillis();
       lynxView.setExtraTiming(extraTimingInfo);
       lynxView.renderTemplateUrl(url, initData);
+    } else if (url.startsWith("assets://")) {
+      url = url.substring("assets://".length());
+      byte[] templateBundleData = readFileFromAssets(this, url);
+      extraTimingInfo.mPrepareTemplateEnd = System.currentTimeMillis();
+      lynxView.setExtraTiming(extraTimingInfo);
+      lynxView.renderTemplateWithBaseUrl(templateBundleData, initData, url);
     } else {
       Log.i(TAG, "openTargetUrl failed: not supported url.");
     }
@@ -353,68 +365,14 @@ public class LynxViewShellActivity extends AppCompatActivity {
   }
 
   public static boolean isAssetFilename(String url) {
-    return url != null
-        && (url.startsWith(URL_PREFIX) || url.startsWith(ASSET_URL_PREFIX));
+    return url.startsWith(URL_PREFIX);
   }
 
   public static String getAssetFilename(String url) {
-    if (url == null) {
-      return null;
-    }
-    if (url.startsWith(URL_PREFIX)) {
-      return url.substring(URL_PREFIX.length());
-    }
-    if (url.startsWith(ASSET_URL_PREFIX)) {
-      return url.substring(ASSET_URL_PREFIX.length());
-    }
-    return url;
-  }
-
-  public static String getAssetFilePath(String url) {
-    return stripResourceQueryAndFragment(getAssetFilename(url));
-  }
-
-  private static String stripResourceQueryAndFragment(String url) {
-    if (url == null) {
-      return null;
-    }
-    int end = url.length();
-    int queryIndex = url.indexOf('?');
-    if (queryIndex >= 0) {
-      end = Math.min(end, queryIndex);
-    }
-    int paramsIndex = url.indexOf('&');
-    if (paramsIndex >= 0) {
-      end = Math.min(end, paramsIndex);
-    }
-    int fragmentIndex = url.indexOf('#');
-    if (fragmentIndex >= 0) {
-      end = Math.min(end, fragmentIndex);
-    }
-    return url.substring(0, end);
+    return url.substring(URL_PREFIX.length());
   }
 
   public static byte[] readFileFromAssets(Context context, String fileName) {
-    if (context == null || fileName == null || fileName.isEmpty()) {
-      return null;
-    }
-    String wasmFallbackFileName = getWasmFallbackFileName(fileName);
-    byte[] data = readFileFromAssets(context, fileName, wasmFallbackFileName == null);
-    if (data == null && wasmFallbackFileName != null) {
-      data = readFileFromAssets(context, wasmFallbackFileName, true);
-    }
-    return data;
-  }
-
-  private static String getWasmFallbackFileName(String fileName) {
-    if (fileName == null || !fileName.endsWith(LYNX_BUNDLE_SUFFIX)) {
-      return null;
-    }
-    return fileName.substring(0, fileName.length() - LYNX_BUNDLE_SUFFIX.length())
-        + WASM_SUFFIX;
-  }
-
-  private static byte[] readFileFromAssets(Context context, String fileName, boolean logError) {
     AssetManager assetManager = context.getAssets();
     ByteArrayOutputStream byteArrayOutputStream = null;
     InputStream inputStream = null;
@@ -431,9 +389,7 @@ public class LynxViewShellActivity extends AppCompatActivity {
 
       return byteArrayOutputStream.toByteArray();
     } catch (IOException e) {
-      if (logError) {
-        e.printStackTrace();
-      }
+      e.printStackTrace();
       return null;
     } finally {
       try {
