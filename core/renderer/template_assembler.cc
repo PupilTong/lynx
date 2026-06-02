@@ -867,6 +867,7 @@ void TemplateAssembler::LoadTemplateBundle(
 
   source_size_ = template_bundle.total_size_;
   url_ = url;
+  is_wasm_template_ = false;
 
   if (page_proxy_.element_manager()) {
     page_proxy_.element_manager()->SetEnableDumpElementTree(
@@ -901,11 +902,12 @@ void TemplateAssembler::LoadTemplate(
 #endif
   source_size_ = source.size();
   url_ = url;
+  is_wasm_template_ = HasWamrWasmBytecodeMagic(source);
   pre_painting_ = pipeline_options->enable_pre_painting;
   if (pre_painting_) {
     page_proxy_.SetPrePaintingStage(PrePaintingStage::kStartPrePainting);
   }
-  if (HasWamrWasmBytecodeMagic(source)) {
+  if (is_wasm_template_) {
     LoadTemplateInternal(
         url, template_data, pipeline_options,
         [this, source = std::move(source),
@@ -1558,7 +1560,9 @@ bool TemplateAssembler::BuildComponentEntryInternal(
     return false;
   }
 
-  delegate_.OnComponentDecoded(component_entry->CreateTasmRuntimeBundle());
+  if (!is_wasm_template_) {
+    delegate_.OnComponentDecoded(component_entry->CreateTasmRuntimeBundle());
+  }
 
   // Check whether the lazy bundle is compatible with the page. When
   // the dsl of the lazy bundle is different with the dsl of the page,
@@ -2393,7 +2397,9 @@ bool TemplateAssembler::UpdateConfig(
   }
   lepus::Value configToJS;
   if (page_proxy_.UpdateConfig(config, configToJS, true, pipeline_options)) {
-    delegate_.OnCardConfigDataChanged(configToJS);
+    if (!is_wasm_template_) {
+      delegate_.OnCardConfigDataChanged(configToJS);
+    }
     return true;
   }
   return false;
@@ -2495,10 +2501,16 @@ bool TemplateAssembler::UpdateGlobalDataInternal(
 
 void TemplateAssembler::OnDataUpdatedByNative(tasm::TemplateData value,
                                               const bool reset) {
+  if (is_wasm_template_) {
+    return;
+  }
   delegate_.OnDataUpdatedByNative(std::move(value), reset);
 }
 
 void TemplateAssembler::NotifyGlobalPropsChanged(const lepus::Value& value) {
+  if (is_wasm_template_) {
+    return;
+  }
   delegate_.OnGlobalPropsUpdated(value);
 }
 
@@ -2562,16 +2574,19 @@ void TemplateAssembler::SendFontScaleChanged(float scale) {
 
 void TemplateAssembler::SendGlobalEvent(const std::string& name,
                                         const lepus::Value& info) {
-  auto args = lepus::CArray::Create();
-  args->emplace_back(name);
-  // info be ShallowCopy first to avoid to be marked const.
-  args->emplace_back(lepus_value::ShallowCopy(info));
-  auto event = fml::MakeRefCounted<runtime::MessageEvent>(
-      runtime::kMessageEventTypeSendGlobalEvent,
-      runtime::ContextProxy::Type::kCoreContext,
-      runtime::ContextProxy::Type::kJSContext,
-      std::make_unique<pub::ValueImplLepus>(lepus::Value(std::move(args))));
-  delegate_.DispatchMessageEvent(std::move(event));
+  if (!is_wasm_template_) {
+    auto args = lepus::CArray::Create();
+    args->emplace_back(name);
+    // info be ShallowCopy first to avoid to be marked const.
+    args->emplace_back(lepus_value::ShallowCopy(info));
+    auto event = fml::MakeRefCounted<runtime::MessageEvent>(
+        runtime::kMessageEventTypeSendGlobalEvent,
+        runtime::ContextProxy::Type::kCoreContext,
+        runtime::ContextProxy::Type::kJSContext,
+        std::make_unique<pub::ValueImplLepus>(
+            lepus::Value(std::move(args))));
+    delegate_.DispatchMessageEvent(std::move(event));
+  }
   if (!ShouldSendEventToMainThread()) {
     return;
   }
@@ -2860,6 +2875,9 @@ void TemplateAssembler::PreloadLazyBundles(
 
 void TemplateAssembler::OnDynamicJSSourcePrepared(
     const std::string& component_url) {
+  if (is_wasm_template_) {
+    return;
+  }
   auto event = fml::MakeRefCounted<runtime::MessageEvent>(
       runtime::kMessageEventTypeOnDynamicJSSourcePrepared,
       runtime::ContextProxy::Type::kCoreContext,
@@ -2870,17 +2888,20 @@ void TemplateAssembler::OnDynamicJSSourcePrepared(
 
 void TemplateAssembler::OnBTSConsoleEvent(const std::string& func_name,
                                           const std::string& args) {
-  auto params = lepus::Dictionary::Create();
-  BASE_STATIC_STRING_DECL(kFuncName, "func_name");
-  BASE_STATIC_STRING_DECL(kParams, "params");
-  params->SetValue(kFuncName, func_name);
-  params->SetValue(kParams, args);
-  auto event = fml::MakeRefCounted<runtime::MessageEvent>(
-      runtime::kMessageEventTypeOnBTSConsoleEvent,
-      runtime::ContextProxy::Type::kCoreContext,
-      runtime::ContextProxy::Type::kJSContext,
-      std::make_unique<pub::ValueImplLepus>(lepus::Value(std::move(params))));
-  delegate_.DispatchMessageEvent(std::move(event));
+  if (!is_wasm_template_) {
+    auto params = lepus::Dictionary::Create();
+    BASE_STATIC_STRING_DECL(kFuncName, "func_name");
+    BASE_STATIC_STRING_DECL(kParams, "params");
+    params->SetValue(kFuncName, func_name);
+    params->SetValue(kParams, args);
+    auto event = fml::MakeRefCounted<runtime::MessageEvent>(
+        runtime::kMessageEventTypeOnBTSConsoleEvent,
+        runtime::ContextProxy::Type::kCoreContext,
+        runtime::ContextProxy::Type::kJSContext,
+        std::make_unique<pub::ValueImplLepus>(
+            lepus::Value(std::move(params))));
+    delegate_.DispatchMessageEvent(std::move(event));
+  }
   // Post msg to devtool when using LynxAir, which doesn't have js runtime.
   if (lepus_observer_ != nullptr) {
     lepus_observer_->OnConsoleEvent(func_name, args);
@@ -2938,6 +2959,9 @@ void TemplateAssembler::ExecuteDataProcessor(TemplateData& input) {
 void TemplateAssembler::OnJSPrepared(
     const std::string& url,
     const std::shared_ptr<PipelineOptions>& pipeline_options) {
+  if (is_wasm_template_) {
+    return;
+  }
   uint64_t trace_flow_id = TRACE_FLOW_ID();
   TRACE_EVENT(LYNX_TRACE_CATEGORY_VITALS, TEMPLATE_ASSEMBLER_ON_JS_PREPARED,
               [&url, trace_flow_id](lynx::perfetto::EventContext ctx) {
@@ -3644,6 +3668,9 @@ lepus::Value TemplateAssembler::GetCustomSectionByKey(
 }
 
 void TemplateAssembler::OnNativeAppReady() {
+  if (is_wasm_template_) {
+    return;
+  }
   auto event = fml::MakeRefCounted<runtime::MessageEvent>(
       runtime::kMessageEventTypeOnNativeAppReady,
       runtime::ContextProxy::Type::kCoreContext,
