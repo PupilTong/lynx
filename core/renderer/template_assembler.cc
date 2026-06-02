@@ -46,6 +46,7 @@
 #include "core/resource/lazy_bundle/lazy_bundle_loader.h"
 #include "core/resource/lazy_bundle/lazy_bundle_utils.h"
 #include "core/resource/trace/resource_trace_event_def.h"
+#include "core/resource/wasm_bytecode_utils.h"
 #include "core/runtime/common/bindings/event/message_event.h"
 #include "core/runtime/common/js_error_reporter.h"
 #include "core/runtime/js/bindings/api_call_back.h"
@@ -904,6 +905,25 @@ void TemplateAssembler::LoadTemplate(
   if (pre_painting_) {
     page_proxy_.SetPrePaintingStage(PrePaintingStage::kStartPrePainting);
   }
+  if (HasWamrWasmBytecodeMagic(source)) {
+    LoadTemplateInternal(
+        url, template_data, pipeline_options,
+        [this, source = std::move(source),
+         url](const std::shared_ptr<TemplateEntry>& card_entry) mutable {
+          if (!card_entry->InitWithWasmTemplate(
+                  this, this, std::move(source), url, page_options_)) {
+            base::LynxError error{
+                error::E_APP_BUNDLE_LOAD_PARSE_FAILED,
+                ConstructDecodeErrorMessage(true, card_entry->GetName(),
+                                            card_entry->GetErrorMsg())};
+            this->ReportError(std::move(error));
+            return false;
+          }
+          return true;
+        });
+    ClearCacheData();
+    return;
+  }
   LoadTemplateInternal(
       url, template_data, pipeline_options,
       [this, source = std::move(source),
@@ -1031,6 +1051,7 @@ void TemplateAssembler::LoadTemplateInternal(
   // after decoding. When default enable unified pipeline, we can put this at
   // the begining of LoadTemplate.
   PipelineScope pipeline_scope(this, pipeline_options);
+  const bool is_wasm_context = card->GetVm() && card->GetVm()->IsWasmContext();
 
   {
     // Trace VM Execute
@@ -1043,8 +1064,12 @@ void TemplateAssembler::LoadTemplateInternal(
     OnVMExecute();
 
     // Get VM & exec VM.
-    if (!card->GetVm()->Execute(
-            card->template_bundle().GetContextBundle().get())) {
+    if (!card->GetVm()->Execute(card->template_bundle()
+                                    .GetContextBundle()
+                                    .get())) {
+      if (is_wasm_context) {
+        return;
+      }
       base::LynxError error{error::E_APP_BUNDLE_LOAD_RENDER_FAILED,
                             "vm execute failed"};
       ReportError(std::move(error));
@@ -1078,7 +1103,22 @@ void TemplateAssembler::LoadTemplateInternal(
                          pipeline_options);
 
     // render template
-    RenderTemplate(card, data, pipeline_options);
+    if (is_wasm_context) {
+      tasm::TimingCollector::Instance()->Mark(tasm::timing::kCreateVdomStart);
+      pipeline_options->is_first_screen = true;
+      tasm::TimingCollector::Instance()->Mark(tasm::timing::kCreateVdomEnd);
+      tasm::TimingCollector::Instance()->Mark(tasm::timing::kMtsRenderEnd);
+      if (pipeline_options->enable_unified_pixel_pipeline) {
+        this->GetCurrentPipelineContext()->RequestResolve();
+      } else {
+        page_proxy()->element_manager()->OnPatchFinish(pipeline_options);
+        if (page_proxy()->element_manager()->GetEnableDumpElementTree()) {
+          DumpElementTree(card);
+        }
+      }
+    } else {
+      RenderTemplate(card, data, pipeline_options);
+    }
 
     // starts to run pixel pipeline;
     pipeline_scope.Exit();

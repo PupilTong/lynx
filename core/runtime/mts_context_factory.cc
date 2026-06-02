@@ -18,6 +18,7 @@ std::unique_ptr<MTSContext> MTSContextFactory::Create(
     int runtime_mode, const tasm::PageOptions& page_options) {
   switch (type) {
     case ContextType::LepusNGContextType:
+    case ContextType::WasmContextType:
       return std::make_unique<lepus::QuickContext>(
           runtime_private, disable_tracing_gc, runtime_mode, page_options);
 
@@ -47,6 +48,9 @@ std::unique_ptr<ContextBundle> ContextBundleFactory::Create(
   switch (context_type) {
     case ContextType::LepusNGContextType:
       return std::make_unique<lepus::QuickContextBundle>();
+
+    case ContextType::WasmContextType:
+      return nullptr;
 
     case ContextType::VMContextType:
 #if !ENABLE_JUST_LEPUSNG

@@ -146,4 +146,8 @@ lynx_core_source_set("shell") {
     "../services/timing_handler",
     "../services/timing_handler:timing_handler_delegate",
   ]
+
+  if (enable_wasmr) {
+    public_deps += [ "../runtime/wasmr:wasmr" ]
+  }
 }

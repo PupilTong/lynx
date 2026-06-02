@@ -96,7 +96,12 @@ void SetEngineHostContext(wasm_exec_env_t exec_env, MTSContext* context) {
 }
 
 MTSContext* GetEngineHostContext(wasm_exec_env_t exec_env) {
-  return static_cast<MTSContext*>(wasm_runtime_get_user_data(exec_env));
+  auto* context = static_cast<MTSContext*>(wasm_runtime_get_user_data(exec_env));
+  if (context != nullptr) {
+    return context;
+  }
+  return static_cast<MTSContext*>(
+      wasm_runtime_get_custom_data(wasm_runtime_get_module_inst(exec_env)));
 }
 
 }  // namespace wasmr

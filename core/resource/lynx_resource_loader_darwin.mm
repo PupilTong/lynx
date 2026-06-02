@@ -14,6 +14,7 @@
 #include "base/trace/native/trace_event.h"
 #include "core/resource/lynx_resource_setting.h"
 #include "core/resource/trace/resource_trace_event_def.h"
+#include "core/resource/wasm_bytecode_utils.h"
 #include "core/shell/ios/data_utils.h"
 #import "platform/darwin/common/lynx/TemplateRenderCallbackProtocol.h"
 
@@ -28,19 +29,10 @@ static NSString* const kLoadScriptMethodName = @"LoadScript";
 static NSString* const kLoadLocalScriptMethodName = @"LoadLocalScript";
 static NSString* const kNullDataMsg = @"response with null data";
 
-bool HasWamrWasmBytecodeMagic(const uint8_t* data, size_t size) {
-  return data != nullptr && size >= 4 && data[0] == '\0' && data[1] == 'a' &&
-         data[2] == 's' && data[3] == 'm';
-}
-
-bool HasWamrWasmBytecodeMagic(const std::vector<uint8_t>& data) {
-  return HasWamrWasmBytecodeMagic(data.data(), data.size());
-}
-
 bool HasWamrWasmBytecodeMagic(NSData* data) {
   return data != nil &&
-         HasWamrWasmBytecodeMagic(static_cast<const uint8_t*>(data.bytes),
-                                  data.length);
+         lynx::tasm::HasWamrWasmBytecodeMagic(
+             static_cast<const uint8_t*>(data.bytes), data.length);
 }
 
 void ReportError(__weak id<LynxErrorReceiverProtocol> weakErrorReceiver, NSString* methodName,
@@ -72,7 +64,7 @@ void VerifyLynxTemplateResource(const std::string& url, lynx::pub::LynxResourceR
     }
     // WAMR detects supported WASM bytecode from magic bytes instead of file
     // names: "\0asm".
-    if (HasWamrWasmBytecodeMagic(response.data)) {
+    if (lynx::tasm::HasWamrWasmBytecodeMagic(response.data)) {
       return;
     }
     if (!response.data.empty()) {

@@ -9,6 +9,8 @@ if (enable_wasmr) {
     sources = [
       "wasmr_host_functions.cc",
       "wasmr_host_functions.h",
+      "wasmr_runner.cc",
+      "wasmr_runner.h",
     ]
     deps = [ "../lepus/bindings:bindings" ]
     public_deps = [ "../../../third_party/wasmr:wasmr" ]

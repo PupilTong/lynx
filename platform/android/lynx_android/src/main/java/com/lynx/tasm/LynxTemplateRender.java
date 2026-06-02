@@ -3714,7 +3714,8 @@ public class LynxTemplateRender
 
     ILynxSecurityService securityService =
         LynxServiceCenter.inst().getService(ILynxSecurityService.class);
-    if (securityService != null) {
+    if (securityService != null
+        && !WamrWasmBytecodeUtils.hasWamrWasmBytecodeMagic(template, buffer)) {
       // Do Security Check;
       timingOption.markTiming(TimingConstants.VERIFY_TASM_START);
       SecurityResult result = securityService.verifyTASM(

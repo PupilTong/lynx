@@ -10,6 +10,7 @@ import com.lynx.tasm.resourceprovider.LynxResourceRequest;
 import com.lynx.tasm.service.LynxServiceCenter;
 import com.lynx.tasm.service.security.ILynxSecurityService;
 import com.lynx.tasm.service.security.SecurityResult;
+import com.lynx.tasm.utils.WamrWasmBytecodeUtils;
 import java.nio.ByteBuffer;
 
 /**
@@ -35,17 +36,6 @@ class TemplateResourceCallback extends GuardedResourceCallback {
     return this.mResourceType;
   }
 
-  private static boolean hasWamrWasmBytecodeMagic(byte[] data) {
-    return data != null && data.length >= 4 && data[0] == 0 && data[1] == 'a'
-        && data[2] == 's' && data[3] == 'm';
-  }
-
-  private static boolean hasWamrWasmBytecodeMagic(ByteBuffer buffer) {
-    return buffer != null && buffer.limit() >= 4 && buffer.get(0) == 0
-        && buffer.get(1) == 'a' && buffer.get(2) == 's'
-        && buffer.get(3) == 'm';
-  }
-
   public void onTemplateLoaded(
       boolean success, byte[] data, TemplateBundle bundle, ByteBuffer buffer, String errorMsg) {
     if (!EnsureInvokedOnce()) {
@@ -58,7 +48,7 @@ class TemplateResourceCallback extends GuardedResourceCallback {
     // WAMR detects supported WASM bytecode from magic bytes instead of file
     // names: "\0asm".
     final boolean wamrWasmBytecode = success && !bundleValid
-        && (hasWamrWasmBytecodeMagic(data) || hasWamrWasmBytecodeMagic(buffer));
+        && WamrWasmBytecodeUtils.hasWamrWasmBytecodeMagic(data, buffer);
     if (wamrWasmBytecode) {
       LynxResourceLoader.nativeInvokeCallback(mResponseHandler, data, 0L, buffer,
           LynxResourceLoader.RESOURCE_LOADER_SUCCESS, errorMsg);

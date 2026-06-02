@@ -35,6 +35,7 @@ using lepus::Value;
 enum ContextType {
   VMContextType,         // Run low level version lepus with VmContext
   LepusNGContextType,    // Run lepusNG with qucikjs code
+  WasmContextType,       // Run WAMR WASM with LepusNG host bindings
   RTSContextType,        // Run RTS with VmContext
   RTSNativeContextType,  // Run RTS with NativeContext
 };
