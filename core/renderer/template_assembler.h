@@ -888,9 +888,7 @@ class TemplateAssembler final : public TemplateEntryHolder,
       const std::shared_ptr<TemplateData>& template_data,
       std::shared_ptr<PipelineOptions>& pipeline_options,
       base::MoveOnlyClosure<bool, const std::shared_ptr<TemplateEntry>&>
-          entry_initializer,
-      base::MoveOnlyClosure<bool, const std::shared_ptr<TemplateEntry>&>
-          vm_executor = nullptr);
+          entry_initializer);
 
   bool OnLoadTemplate(std::shared_ptr<PipelineOptions>& pipeline_options);
   void DidLoadTemplate();

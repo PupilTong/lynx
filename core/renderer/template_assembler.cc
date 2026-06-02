@@ -908,8 +908,10 @@ void TemplateAssembler::LoadTemplate(
   if (HasWamrWasmBytecodeMagic(source)) {
     LoadTemplateInternal(
         url, template_data, pipeline_options,
-        [this](const std::shared_ptr<TemplateEntry>& card_entry) mutable {
-          if (!card_entry->InitWithWasmTemplate(this, this, page_options_)) {
+        [this, source = std::move(source),
+         url](const std::shared_ptr<TemplateEntry>& card_entry) mutable {
+          if (!card_entry->InitWithWasmTemplate(
+                  this, this, std::move(source), url, page_options_)) {
             base::LynxError error{
                 error::E_APP_BUNDLE_LOAD_PARSE_FAILED,
                 ConstructDecodeErrorMessage(true, card_entry->GetName(),
@@ -917,25 +919,6 @@ void TemplateAssembler::LoadTemplate(
             this->ReportError(std::move(error));
             return false;
           }
-          return true;
-        },
-        [this, source = std::move(source),
-         url](const std::shared_ptr<TemplateEntry>& card_entry) mutable {
-          if (!card_entry->GetVm()) {
-            base::LynxError error{error::E_APP_BUNDLE_LOAD_RENDER_FAILED,
-                                  "WASM template context is null"};
-            this->ReportError(std::move(error));
-            return false;
-          }
-
-          std::string error_message;
-          if (!card_entry->GetVm()->ExecuteWasm(source, url, &error_message)) {
-            base::LynxError error{error::E_APP_BUNDLE_LOAD_RENDER_FAILED,
-                                  error_message};
-            this->ReportError(std::move(error));
-            return false;
-          }
-
           return true;
         });
     ClearCacheData();
@@ -977,9 +960,7 @@ void TemplateAssembler::LoadTemplateInternal(
     const std::string& url, const std::shared_ptr<TemplateData>& template_data,
     std::shared_ptr<PipelineOptions>& pipeline_options,
     base::MoveOnlyClosure<bool, const std::shared_ptr<TemplateEntry>&>
-        entry_initializer,
-    base::MoveOnlyClosure<bool, const std::shared_ptr<TemplateEntry>&>
-        vm_executor) {
+        entry_initializer) {
 #ifdef AS_PLUGIN
   LOGE("lynx_plugin: load lynx plugin so");
 #else
@@ -1070,6 +1051,7 @@ void TemplateAssembler::LoadTemplateInternal(
   // after decoding. When default enable unified pipeline, we can put this at
   // the begining of LoadTemplate.
   PipelineScope pipeline_scope(this, pipeline_options);
+  const bool is_wasm_context = card->GetVm() && card->GetVm()->IsWasmContext();
 
   {
     // Trace VM Execute
@@ -1082,14 +1064,10 @@ void TemplateAssembler::LoadTemplateInternal(
     OnVMExecute();
 
     // Get VM & exec VM.
-    const bool executed =
-        vm_executor
-            ? vm_executor(card)
-            : card->GetVm()->Execute(card->template_bundle()
-                                         .GetContextBundle()
-                                         .get());
-    if (!executed) {
-      if (vm_executor) {
+    if (!card->GetVm()->Execute(card->template_bundle()
+                                    .GetContextBundle()
+                                    .get())) {
+      if (is_wasm_context) {
         return;
       }
       base::LynxError error{error::E_APP_BUNDLE_LOAD_RENDER_FAILED,
@@ -1125,7 +1103,7 @@ void TemplateAssembler::LoadTemplateInternal(
                          pipeline_options);
 
     // render template
-    if (vm_executor) {
+    if (is_wasm_context) {
       tasm::TimingCollector::Instance()->Mark(tasm::timing::kCreateVdomStart);
       pipeline_options->is_first_screen = true;
       tasm::TimingCollector::Instance()->Mark(tasm::timing::kCreateVdomEnd);

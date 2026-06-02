@@ -344,6 +344,7 @@ bool TemplateEntry::InitLepusContext(
 
 bool TemplateEntry::InitWithWasmTemplate(
     TemplateAssembler* assembler, PageConfigger* page_configger,
+    std::vector<uint8_t> source, std::string url,
     const PageOptions& page_options) {
   auto page_config = page_configger->GetPageConfig();
   if (!page_config) {
@@ -366,7 +367,7 @@ bool TemplateEntry::InitWithWasmTemplate(
   if (!vm_context_) {
     uint32_t mode = tasm::performance::MemoryMonitor::ScriptingEngineMode();
     vm_context_ = runtime::MTSRuntime::CreateContext(
-        runtime::ContextType::LepusNGContextType,
+        runtime::ContextType::WasmContextType,
         page_config->GetDisableQuickTracingGC(), mode, page_options);
   }
   if (!vm_context_) {
@@ -374,9 +375,11 @@ bool TemplateEntry::InitWithWasmTemplate(
     return false;
   }
 
+  vm_context_->SetWasmModule(std::move(source), std::move(url));
   vm_context_->SetSdkVersion(assembler->target_sdk_version_);
   vm_context_->Initialize();
   SetName(DEFAULT_ENTRY_NAME);
+  vm_context_->set_name(DEFAULT_ENTRY_NAME);
   SetTemplateAssembler(assembler);
   RegisterBuiltin();
   vm_context_->RegisterLynx(page_config->GetEnableSignalAPIBoolValue());

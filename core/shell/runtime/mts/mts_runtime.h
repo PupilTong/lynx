@@ -117,8 +117,7 @@ class MTSRuntime : private MTSContextHolder {
   // Execute with optional bundle info (e.g. bundleId for RTSNative).
   bool Execute(const ContextBundle* bundle);
 
-  bool ExecuteWasm(const std::vector<uint8_t>& module, const std::string& url,
-                   std::string* error_msg);
+  void SetWasmModule(std::vector<uint8_t> module, std::string url);
 
   // only for main bundle
   bool TryExecute();
@@ -228,7 +227,10 @@ class MTSRuntime : private MTSContextHolder {
 
   // check context type
   bool IsVMContext() const { return type_ == VMContextType; }
-  bool IsLepusNGContext() const { return type_ == LepusNGContextType; }
+  bool IsLepusNGContext() const {
+    return type_ == LepusNGContextType || type_ == WasmContextType;
+  }
+  bool IsWasmContext() const { return type_ == WasmContextType; }
   bool IsRTSContext() const { return type_ == RTSContextType; }
   bool IsRTSNativeContext() const { return type_ == RTSNativeContextType; }
 
@@ -323,6 +325,8 @@ class MTSRuntime : private MTSContextHolder {
 
   ContextType type_;
   std::string name_;
+  std::vector<uint8_t> wasm_module_;
+  std::string wasm_module_url_;
 
   std::string sdk_version_{"null"};
 

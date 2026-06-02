@@ -86,6 +86,7 @@ class TemplateEntry : public VmContextHolder, public CSSStyleSheetDelegate {
 
   bool InitWithWasmTemplate(TemplateAssembler* assembler,
                             PageConfigger* page_configger,
+                            std::vector<uint8_t> source, std::string url,
                             const PageOptions& page_options = PageOptions());
 
   bool ConstructContext(TemplateAssembler* assembler, bool is_lepusng_binary,

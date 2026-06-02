@@ -132,31 +132,35 @@ std::shared_ptr<MTSRuntime> MTSRuntime::CreateContext(
 bool MTSRuntime::Execute(const ContextBundle* bundle) {
   if (HasPreExecuteSuccess()) {
     ResetPreExecuteSuccess();
-    return true;
+    if (!IsWasmContext()) {
+      return true;
+    }
   }
   ScriptingScope scope(this);
 
   EnsureLynx();
+  if (IsWasmContext()) {
+#if ENABLE_WASMR
+    std::string error_msg;
+    if (!wasmr::ExecuteWasmModule(wasm_module_.data(), wasm_module_.size(),
+                                  mts_context_.get(), wasm_module_url_,
+                                  &error_msg)) {
+      ReportErrorWithMsg(error_msg, error::E_APP_BUNDLE_LOAD_RENDER_FAILED);
+      return false;
+    }
+    return true;
+#else
+    ReportErrorWithMsg("WAMR is disabled in this build",
+                       error::E_APP_BUNDLE_LOAD_RENDER_FAILED);
+    return false;
+#endif
+  }
   return mts_context_->ExecuteBinaryWithBundle(bundle, nullptr);
 }
 
-bool MTSRuntime::ExecuteWasm(const std::vector<uint8_t>& module,
-                             const std::string& url,
-                             std::string* error_msg) {
-#if ENABLE_WASMR
-  if (HasPreExecuteSuccess()) {
-    ResetPreExecuteSuccess();
-  }
-  ScriptingScope scope(this);
-  EnsureLynx();
-  return wasmr::ExecuteWasmModule(module.data(), module.size(),
-                                  mts_context_.get(), url, error_msg);
-#else
-  if (error_msg != nullptr) {
-    *error_msg = "WAMR is disabled in this build";
-  }
-  return false;
-#endif
+void MTSRuntime::SetWasmModule(std::vector<uint8_t> module, std::string url) {
+  wasm_module_ = std::move(module);
+  wasm_module_url_ = std::move(url);
 }
 
 void MTSRuntime::EnsureLynx() {
