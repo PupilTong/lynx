@@ -49,11 +49,12 @@ enum class WasmReturnKind {
   kAny,
 };
 
-enum class HiddenComponentId {
+enum class HiddenCreateArgs {
   kNone,
-  kPrependNumberZero,
-  kPrependStringZero,
-  kInsertNumberZeroAfterFirstArg,
+  kCreateElement,
+  kCreatePage,
+  kCreateParent,
+  kCreateList,
 };
 
 struct BindingDescriptor {
@@ -62,7 +63,7 @@ struct BindingDescriptor {
   const WasmArgKind* args;
   size_t argc;
   WasmReturnKind return_kind;
-  HiddenComponentId hidden_component_id;
+  HiddenCreateArgs hidden_create_args;
 };
 
 struct EngineHostObject {
@@ -340,6 +341,10 @@ lepus::Value ReadArgument(wasm_exec_env_t exec_env, RawArgReader* reader,
   return lepus::Value();
 }
 
+lepus::Value DefaultInfoValue() {
+  return lepus::Value(lepus::Value::kCreateAsUndefinedTag);
+}
+
 bool ValueAsI32(const lepus::Value& value, const char* function_name,
                 wasm_exec_env_t exec_env, int32_t* out) {
   if (value.IsNumber()) {
@@ -535,7 +540,7 @@ void EngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
   bool ok = true;
   RawArgReader reader(raw_args);
   std::vector<lepus::Value> args;
-  args.reserve(descriptor->argc);
+  args.reserve(descriptor->argc + 2);
   for (size_t i = 0; i < descriptor->argc; ++i) {
     args.emplace_back(
         ReadArgument(exec_env, &reader, descriptor->args[i], descriptor->name,
@@ -545,17 +550,22 @@ void EngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
     }
   }
 
-  switch (descriptor->hidden_component_id) {
-    case HiddenComponentId::kNone:
+  switch (descriptor->hidden_create_args) {
+    case HiddenCreateArgs::kNone:
       break;
-    case HiddenComponentId::kPrependNumberZero:
+    case HiddenCreateArgs::kCreateElement:
+      args.insert(args.begin() + 1, lepus::Value(0.0));
+      break;
+    case HiddenCreateArgs::kCreatePage:
+      args.insert(args.begin(), lepus::Value(std::string("0")));
+      args.insert(args.begin() + 1, lepus::Value(0.0));
+      break;
+    case HiddenCreateArgs::kCreateParent:
       args.insert(args.begin(), lepus::Value(0.0));
       break;
-    case HiddenComponentId::kPrependStringZero:
-      args.insert(args.begin(), lepus::Value(std::string("0")));
-      break;
-    case HiddenComponentId::kInsertNumberZeroAfterFirstArg:
-      args.insert(args.begin() + 1, lepus::Value(0.0));
+    case HiddenCreateArgs::kCreateList:
+      args.insert(args.begin(), lepus::Value(0.0));
+      args.insert(args.begin() + 3, DefaultInfoValue());
       break;
   }
 
@@ -572,73 +582,65 @@ void EngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
   constexpr BindingDescriptor id = {symbol,                                \
                                     &tasm::RendererFunctions::function,     \
                                     args, std::size(args), return_kind,     \
-                                    HiddenComponentId::kNone}
+                                    HiddenCreateArgs::kNone}
 
-#define BINDING_WITH_COMPONENT_ID(id, symbol, function, return_kind, args, \
-                                  hidden_component_id)                    \
+#define BINDING_WITH_CREATE_ARGS(id, symbol, function, return_kind, args, \
+                                 hidden_create_args)                    \
   constexpr BindingDescriptor id = {symbol,                               \
                                     &tasm::RendererFunctions::function,    \
                                     args, std::size(args), return_kind,    \
-                                    hidden_component_id}
+                                    hidden_create_args}
 
 #define BINDING0(id, symbol, function, return_kind)               \
   constexpr BindingDescriptor id = {symbol,                       \
                                     &tasm::RendererFunctions::function, \
                                     nullptr, 0, return_kind,      \
-                                    HiddenComponentId::kNone}
+                                    HiddenCreateArgs::kNone}
 
-#define BINDING0_WITH_COMPONENT_ID(id, symbol, function, return_kind, \
-                                   hidden_component_id)              \
+#define BINDING0_WITH_CREATE_ARGS(id, symbol, function, return_kind, \
+                                  hidden_create_args)              \
   constexpr BindingDescriptor id = {symbol,                          \
                                     &tasm::RendererFunctions::function, \
                                     nullptr, 0, return_kind,         \
-                                    hidden_component_id}
+                                    hidden_create_args}
 
-ARG_LIST(kCreateElementArgs, WasmArgKind::kString, WasmArgKind::kAny);
-BINDING_WITH_COMPONENT_ID(
+ARG_LIST(kCreateElementArgs, WasmArgKind::kString);
+BINDING_WITH_CREATE_ARGS(
     kCreateElementBinding, tasm::kCFunctionCreateElement, FiberCreateElement,
     WasmReturnKind::kExternRef, kCreateElementArgs,
-    HiddenComponentId::kInsertNumberZeroAfterFirstArg);
-ARG_LIST(kCreatePageArgs, WasmArgKind::kI32, WasmArgKind::kAny);
-BINDING_WITH_COMPONENT_ID(kCreatePageBinding, tasm::kCFunctionCreatePage,
+    HiddenCreateArgs::kCreateElement);
+BINDING0_WITH_CREATE_ARGS(kCreatePageBinding, tasm::kCFunctionCreatePage,
                           FiberCreatePage, WasmReturnKind::kExternRef,
-                          kCreatePageArgs,
-                          HiddenComponentId::kPrependStringZero);
-ARG_LIST(kCreateParentWithInfoArgs, WasmArgKind::kAny);
-BINDING_WITH_COMPONENT_ID(kCreateViewBinding, tasm::kCFunctionCreateView,
+                          HiddenCreateArgs::kCreatePage);
+BINDING0_WITH_CREATE_ARGS(kCreateViewBinding, tasm::kCFunctionCreateView,
                           FiberCreateView, WasmReturnKind::kExternRef,
-                          kCreateParentWithInfoArgs,
-                          HiddenComponentId::kPrependNumberZero);
+                          HiddenCreateArgs::kCreateParent);
 ARG_LIST(kCreateListArgs, WasmArgKind::kExternRef, WasmArgKind::kExternRef,
-         WasmArgKind::kAny, WasmArgKind::kExternRef);
-BINDING_WITH_COMPONENT_ID(kCreateListBinding, tasm::kCFunctionCreateList,
-                          FiberCreateList, WasmReturnKind::kExternRef,
-                          kCreateListArgs,
-                          HiddenComponentId::kPrependNumberZero);
-BINDING_WITH_COMPONENT_ID(
+         WasmArgKind::kExternRef);
+BINDING_WITH_CREATE_ARGS(kCreateListBinding, tasm::kCFunctionCreateList,
+                         FiberCreateList, WasmReturnKind::kExternRef,
+                         kCreateListArgs, HiddenCreateArgs::kCreateList);
+BINDING0_WITH_CREATE_ARGS(
     kCreateScrollViewBinding, tasm::kCFunctionCreateScrollView,
     FiberCreateScrollView, WasmReturnKind::kExternRef,
-    kCreateParentWithInfoArgs, HiddenComponentId::kPrependNumberZero);
-BINDING_WITH_COMPONENT_ID(kCreateTextBinding, tasm::kCFunctionCreateText,
+    HiddenCreateArgs::kCreateParent);
+BINDING0_WITH_CREATE_ARGS(kCreateTextBinding, tasm::kCFunctionCreateText,
                           FiberCreateText, WasmReturnKind::kExternRef,
-                          kCreateParentWithInfoArgs,
-                          HiddenComponentId::kPrependNumberZero);
-BINDING_WITH_COMPONENT_ID(kCreateImageBinding, tasm::kCFunctionCreateImage,
+                          HiddenCreateArgs::kCreateParent);
+BINDING0_WITH_CREATE_ARGS(kCreateImageBinding, tasm::kCFunctionCreateImage,
                           FiberCreateImage, WasmReturnKind::kExternRef,
-                          kCreateParentWithInfoArgs,
-                          HiddenComponentId::kPrependNumberZero);
-ARG_LIST(kCreateRawTextArgs, WasmArgKind::kString, WasmArgKind::kAny);
+                          HiddenCreateArgs::kCreateParent);
+ARG_LIST(kCreateRawTextArgs, WasmArgKind::kString);
 BINDING(kCreateRawTextBinding, tasm::kCFunctionCreateRawText,
         FiberCreateRawText, WasmReturnKind::kExternRef, kCreateRawTextArgs);
-BINDING0_WITH_COMPONENT_ID(kCreateNonElementBinding,
-                           tasm::kCFunctionCreateNonElement,
-                           FiberCreateNonElement, WasmReturnKind::kExternRef,
-                           HiddenComponentId::kPrependNumberZero);
-BINDING0_WITH_COMPONENT_ID(kCreateWrapperElementBinding,
-                           tasm::kCFunctionCreateWrapperElement,
-                           FiberCreateWrapperElement,
-                           WasmReturnKind::kExternRef,
-                           HiddenComponentId::kPrependNumberZero);
+BINDING0_WITH_CREATE_ARGS(kCreateNonElementBinding,
+                          tasm::kCFunctionCreateNonElement,
+                          FiberCreateNonElement, WasmReturnKind::kExternRef,
+                          HiddenCreateArgs::kCreateParent);
+BINDING0_WITH_CREATE_ARGS(kCreateWrapperElementBinding,
+                          tasm::kCFunctionCreateWrapperElement,
+                          FiberCreateWrapperElement, WasmReturnKind::kExternRef,
+                          HiddenCreateArgs::kCreateParent);
 
 ARG_LIST(kTwoRefsArgs, WasmArgKind::kExternRef, WasmArgKind::kExternRef);
 BINDING(kAppendElementBinding, tasm::kCFunctionAppendElement,
@@ -803,9 +805,9 @@ BINDING(kAdoptStyleSheetBinding, tasm::kCFuncAdoptStyleSheet, AdoptStyleSheet,
 BINDING0(kReplaceStyleSheetsBinding, tasm::kCFuncReplaceStyleSheets,
          ReplaceStyleSheets, WasmReturnKind::kVoid);
 
-#undef BINDING0_WITH_COMPONENT_ID
+#undef BINDING0_WITH_CREATE_ARGS
 #undef BINDING0
-#undef BINDING_WITH_COMPONENT_ID
+#undef BINDING_WITH_CREATE_ARGS
 #undef BINDING
 #undef ARG_LIST
 
@@ -824,15 +826,14 @@ BINDING0(kReplaceStyleSheetsBinding, tasm::kCFuncReplaceStyleSheets,
     const_cast<BindingDescriptor*>(&binding) }
 
 NativeSymbol g_engine_host_symbols[] = {
-    SYMBOL(kCreateElementBinding, SIG(WASM_STRING WASM_ANY, WASM_REF)),
-    SYMBOL(kCreatePageBinding, SIG(WASM_I32 WASM_ANY, WASM_REF)),
-    SYMBOL(kCreateViewBinding, SIG(WASM_ANY, WASM_REF)),
-    SYMBOL(kCreateListBinding,
-           SIG(WASM_REF WASM_REF WASM_ANY WASM_REF, WASM_REF)),
-    SYMBOL(kCreateScrollViewBinding, SIG(WASM_ANY, WASM_REF)),
-    SYMBOL(kCreateTextBinding, SIG(WASM_ANY, WASM_REF)),
-    SYMBOL(kCreateImageBinding, SIG(WASM_ANY, WASM_REF)),
-    SYMBOL(kCreateRawTextBinding, SIG(WASM_STRING WASM_ANY, WASM_REF)),
+    SYMBOL(kCreateElementBinding, SIG(WASM_STRING, WASM_REF)),
+    SYMBOL(kCreatePageBinding, SIG("", WASM_REF)),
+    SYMBOL(kCreateViewBinding, SIG("", WASM_REF)),
+    SYMBOL(kCreateListBinding, SIG(WASM_REF WASM_REF WASM_REF, WASM_REF)),
+    SYMBOL(kCreateScrollViewBinding, SIG("", WASM_REF)),
+    SYMBOL(kCreateTextBinding, SIG("", WASM_REF)),
+    SYMBOL(kCreateImageBinding, SIG("", WASM_REF)),
+    SYMBOL(kCreateRawTextBinding, SIG(WASM_STRING, WASM_REF)),
     SYMBOL(kCreateNonElementBinding, SIG("", WASM_REF)),
     SYMBOL(kCreateWrapperElementBinding, SIG("", WASM_REF)),
     SYMBOL(kAppendElementBinding, SIG(WASM_REF WASM_REF, WASM_REF)),
