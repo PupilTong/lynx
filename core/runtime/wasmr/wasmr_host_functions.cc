@@ -653,9 +653,6 @@ BINDING(kGetParentBinding, tasm::kCFunctionGetParent, FiberGetParent,
         WasmReturnKind::kExternRef, kOneRefArgs);
 BINDING(kGetChildrenBinding, tasm::kCFunctionGetChildren, FiberGetChildren,
         WasmReturnKind::kExternRef, kOneRefArgs);
-ARG_LIST(kCloneElementArgs, WasmArgKind::kExternRef, WasmArgKind::kAny);
-BINDING(kCloneElementBinding, tasm::kCFunctionCloneElement, FiberCloneElement,
-        WasmReturnKind::kExternRef, kCloneElementArgs);
 BINDING(kElementIsEqualBinding, tasm::kCFunctionElementIsEqual,
         FiberElementIsEqual, WasmReturnKind::kBool, kTwoRefsArgs);
 BINDING(kGetElementUniqueIDBinding, tasm::kCFunctionGetElementUniqueID,
@@ -786,10 +783,6 @@ BINDING(kSetIntervalBinding, tasm::kSetInterval, SetInterval,
         WasmReturnKind::kI64, kTimerArgs);
 BINDING(kClearIntervalBinding, tasm::kClearTimeInterval, ClearTimeInterval,
         WasmReturnKind::kVoid, kTimerIDArgs);
-BINDING(kAdoptStyleSheetBinding, tasm::kCFuncAdoptStyleSheet, AdoptStyleSheet,
-        WasmReturnKind::kVoid, kOneRefArgs);
-BINDING0(kReplaceStyleSheetsBinding, tasm::kCFuncReplaceStyleSheets,
-         ReplaceStyleSheets, WasmReturnKind::kVoid);
 
 #undef BINDING0_WITH_CREATE_ARGS
 #undef BINDING0
@@ -832,7 +825,6 @@ NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kSwapElementBinding, SIG(WASM_REF WASM_REF, "")),
     SYMBOL(kGetParentBinding, SIG(WASM_REF, WASM_REF)),
     SYMBOL(kGetChildrenBinding, SIG(WASM_REF, WASM_REF)),
-    SYMBOL(kCloneElementBinding, SIG(WASM_REF WASM_ANY, WASM_REF)),
     SYMBOL(kElementIsEqualBinding, SIG(WASM_REF WASM_REF, WASM_BOOL)),
     SYMBOL(kGetElementUniqueIDBinding, SIG(WASM_REF, WASM_I64)),
     SYMBOL(kGetTagBinding, SIG(WASM_REF WASM_STRING_OUT, WASM_I32)),
@@ -893,8 +885,6 @@ NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kClearTimeoutBinding, SIG(WASM_I64, "")),
     SYMBOL(kSetIntervalBinding, SIG(WASM_REF WASM_I64, WASM_I64)),
     SYMBOL(kClearIntervalBinding, SIG(WASM_I64, "")),
-    SYMBOL(kAdoptStyleSheetBinding, SIG(WASM_REF, "")),
-    SYMBOL(kReplaceStyleSheetsBinding, SIG("", "")),
 };
 
 #undef SYMBOL
