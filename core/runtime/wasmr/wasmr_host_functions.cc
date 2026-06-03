@@ -560,6 +560,8 @@ ARG_LIST(kCreateElementArgs, WasmArgKind::kString, WasmArgKind::kI32,
          WasmArgKind::kAny);
 BINDING(kCreateElementBinding, tasm::kCFunctionCreateElement,
         FiberCreateElement, WasmReturnKind::kExternRef, kCreateElementArgs);
+// __CreatePage takes (component_id, css_id, info); the first string is not an
+// element tag.
 ARG_LIST(kCreatePageArgs, WasmArgKind::kString, WasmArgKind::kI32,
          WasmArgKind::kAny);
 BINDING(kCreatePageBinding, tasm::kCFunctionCreatePage, FiberCreatePage,
