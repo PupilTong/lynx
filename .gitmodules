@@ -1,0 +1,3 @@
+[submodule "rust/yew"]
+	path = rust/yew
+	url = https://github.com/PupilTong/yew.git
