@@ -54,7 +54,6 @@ enum class HiddenCreateArgs {
   kCreateElement,
   kCreatePage,
   kCreateParent,
-  kCreateList,
 };
 
 struct BindingDescriptor {
@@ -341,10 +340,6 @@ lepus::Value ReadArgument(wasm_exec_env_t exec_env, RawArgReader* reader,
   return lepus::Value();
 }
 
-lepus::Value DefaultInfoValue() {
-  return lepus::Value(lepus::Value::kCreateAsUndefinedTag);
-}
-
 bool ValueAsI32(const lepus::Value& value, const char* function_name,
                 wasm_exec_env_t exec_env, int32_t* out) {
   if (value.IsNumber()) {
@@ -563,10 +558,6 @@ void EngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
     case HiddenCreateArgs::kCreateParent:
       args.insert(args.begin(), lepus::Value(0.0));
       break;
-    case HiddenCreateArgs::kCreateList:
-      args.insert(args.begin(), lepus::Value(0.0));
-      args.insert(args.begin() + 3, DefaultInfoValue());
-      break;
   }
 
   lepus::Value result =
@@ -615,11 +606,6 @@ BINDING0_WITH_CREATE_ARGS(kCreatePageBinding, tasm::kCFunctionCreatePage,
 BINDING0_WITH_CREATE_ARGS(kCreateViewBinding, tasm::kCFunctionCreateView,
                           FiberCreateView, WasmReturnKind::kExternRef,
                           HiddenCreateArgs::kCreateParent);
-ARG_LIST(kCreateListArgs, WasmArgKind::kExternRef, WasmArgKind::kExternRef,
-         WasmArgKind::kExternRef);
-BINDING_WITH_CREATE_ARGS(kCreateListBinding, tasm::kCFunctionCreateList,
-                         FiberCreateList, WasmReturnKind::kExternRef,
-                         kCreateListArgs, HiddenCreateArgs::kCreateList);
 BINDING0_WITH_CREATE_ARGS(
     kCreateScrollViewBinding, tasm::kCFunctionCreateScrollView,
     FiberCreateScrollView, WasmReturnKind::kExternRef,
@@ -829,7 +815,6 @@ NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kCreateElementBinding, SIG(WASM_STRING, WASM_REF)),
     SYMBOL(kCreatePageBinding, SIG("", WASM_REF)),
     SYMBOL(kCreateViewBinding, SIG("", WASM_REF)),
-    SYMBOL(kCreateListBinding, SIG(WASM_REF WASM_REF WASM_REF, WASM_REF)),
     SYMBOL(kCreateScrollViewBinding, SIG("", WASM_REF)),
     SYMBOL(kCreateTextBinding, SIG("", WASM_REF)),
     SYMBOL(kCreateImageBinding, SIG("", WASM_REF)),
