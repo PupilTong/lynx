@@ -49,6 +49,23 @@ struct WasmHostValueOut {
 // externref handles owned by the WAMR runtime.
 bool RegisterEngineHostFunctions();
 
+// Keeps a loaded WAMR module instance alive for callbacks that can re-enter the
+// guest after the entry function returns, such as setTimeout / setInterval.
+void RegisterEngineHostModule(wasm_module_t module,
+                              wasm_module_inst_t module_inst,
+                              MTSContext* context);
+
+// Marks the initial entry call as finished. If no async host callbacks are
+// pending, the module instance is released immediately; otherwise it is kept
+// alive until the pending callbacks are cleared or fired.
+void FinishEngineHostModule(wasm_module_inst_t module_inst);
+
+// Cancels pending callbacks and releases the module instance.
+void DestroyEngineHostModule(wasm_module_inst_t module_inst);
+
+// Cancels all pending callbacks that belong to the runtime context.
+void DestroyEngineHostModulesForContext(MTSContext* context);
+
 // Stores the runtime context used by Lynx engine host functions invoked from
 // this WAMR execution environment.
 void SetEngineHostContext(wasm_exec_env_t exec_env, MTSContext* context);
