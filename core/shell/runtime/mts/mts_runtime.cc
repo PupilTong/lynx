@@ -24,6 +24,7 @@
 #include "core/template_bundle/template_codec/binary_decoder/lynx_config_constant_auto_gen.h"
 
 #if ENABLE_WASMR
+#include "core/runtime/wasmr/wasmr_host_functions.h"
 #include "core/runtime/wasmr/wasmr_runner.h"
 #endif
 
@@ -33,7 +34,12 @@ namespace runtime {
 MTSContextHolder::MTSContextHolder(std::unique_ptr<MTSContext> mts_context)
     : mts_context_(std::move(mts_context)) {}
 
-MTSRuntime::~MTSRuntime() { DestroyInspector(); }
+MTSRuntime::~MTSRuntime() {
+#if ENABLE_WASMR
+  wasmr::DestroyEngineHostModulesForContext(mts_context_.get());
+#endif
+  DestroyInspector();
+}
 
 lepus::VMContext* MTSRuntime::ToVMContext(MTSRuntime* context) {
   DCHECK(context->IsVMContext());

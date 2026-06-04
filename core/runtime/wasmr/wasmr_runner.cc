@@ -155,6 +155,7 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
     return false;
   }
 
+  RegisterEngineHostModule(module, module_inst, context);
   wasm_runtime_set_custom_data(module_inst, context);
 
   wasm_exec_env_t exec_env =
@@ -162,8 +163,7 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
   if (exec_env == nullptr) {
     SetError(error_msg,
              "failed to execute WASM template: cannot create exec env");
-    wasm_runtime_deinstantiate(module_inst);
-    wasm_runtime_unload(module);
+    DestroyEngineHostModule(module_inst);
     return false;
   }
   SetEngineHostContext(exec_env, context);
@@ -174,8 +174,11 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
   }
 
   wasm_runtime_destroy_exec_env(exec_env);
-  wasm_runtime_deinstantiate(module_inst);
-  wasm_runtime_unload(module);
+  if (success) {
+    FinishEngineHostModule(module_inst);
+  } else {
+    DestroyEngineHostModule(module_inst);
+  }
   return success;
 }
 

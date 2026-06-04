@@ -12,14 +12,17 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "base/include/thread/timed_task.h"
 #include "base/include/value/base_value.h"
+#include "core/renderer/utils/base/tasm_constants.h"
 #include "core/runtime/lepus/bindings/renderer.h"
 #include "core/runtime/lepus/bindings/renderer_functions.h"
-#include "core/renderer/utils/base/tasm_constants.h"
+#include "core/runtime/mts_context.h"
 
 namespace lynx {
 namespace runtime {
@@ -28,6 +31,7 @@ namespace {
 
 constexpr uintptr_t kNullExternRef = 0;
 constexpr uintptr_t kInvalidExternRef = static_cast<uintptr_t>(-1);
+constexpr uint32_t kTimerCallbackStackSize = 64 * 1024;
 
 enum class WasmArgKind {
   kI32,
@@ -71,6 +75,48 @@ struct EngineHostObject {
   lepus::Value value;
 };
 
+struct WasmModuleTimerState {
+  WasmModuleTimerState(wasm_module_t module,
+                       wasm_module_inst_t module_inst,
+                       MTSContext* context)
+      : module(module), module_inst(module_inst), context(context) {}
+
+  WasmModuleTimerState(const WasmModuleTimerState&) = delete;
+  WasmModuleTimerState& operator=(const WasmModuleTimerState&) = delete;
+
+  ~WasmModuleTimerState() { Shutdown(); }
+
+  void Shutdown() {
+    if (is_shutdown) {
+      return;
+    }
+    is_shutdown = true;
+    if (timer_manager) {
+      timer_manager->StopAllTasks();
+      timer_manager.reset();
+    }
+    timers.clear();
+    if (module_inst != nullptr) {
+      wasm_runtime_deinstantiate(module_inst);
+      module_inst = nullptr;
+    }
+    if (module != nullptr) {
+      wasm_runtime_unload(module);
+      module = nullptr;
+    }
+    context = nullptr;
+  }
+
+  wasm_module_t module = nullptr;
+  wasm_module_inst_t module_inst = nullptr;
+  MTSContext* context = nullptr;
+  bool is_shutdown = false;
+  bool entry_finished = false;
+  bool cleanup_scheduled = false;
+  std::unique_ptr<base::TimedTaskManager> timer_manager;
+  std::unordered_set<uint32_t> timers;
+};
+
 std::mutex& ExternRefRegistryMutex() {
   static auto* mutex = new std::mutex();
   return *mutex;
@@ -80,6 +126,47 @@ std::unordered_set<EngineHostObject*>& ExternRefRegistry() {
   static auto* registry = new std::unordered_set<EngineHostObject*>();
   return *registry;
 }
+
+std::mutex& WasmModuleTimerStatesMutex() {
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::unordered_map<wasm_module_inst_t, std::shared_ptr<WasmModuleTimerState>>&
+WasmModuleTimerStates() {
+  static auto* states =
+      new std::unordered_map<wasm_module_inst_t,
+                             std::shared_ptr<WasmModuleTimerState>>();
+  return *states;
+}
+
+std::shared_ptr<WasmModuleTimerState> GetWasmModuleTimerState(
+    wasm_module_inst_t module_inst) {
+  std::lock_guard<std::mutex> lock(WasmModuleTimerStatesMutex());
+  auto& states = WasmModuleTimerStates();
+  auto iter = states.find(module_inst);
+  if (iter == states.end()) {
+    return nullptr;
+  }
+  return iter->second;
+}
+
+void MaybeEraseFinishedWasmModuleTimerState(
+    const std::shared_ptr<WasmModuleTimerState>& state) {
+  if (!state || !state->entry_finished || !state->timers.empty()) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(WasmModuleTimerStatesMutex());
+  auto& states = WasmModuleTimerStates();
+  auto iter = states.find(state->module_inst);
+  if (iter != states.end() && iter->second == state) {
+    states.erase(iter);
+  }
+}
+
+void DeferEraseFinishedWasmModuleTimerState(
+    const std::shared_ptr<WasmModuleTimerState>& state);
 
 void RegisterExternRefObject(EngineHostObject* object) {
   std::lock_guard<std::mutex> lock(ExternRefRegistryMutex());
@@ -112,6 +199,164 @@ void SetException(wasm_exec_env_t exec_env, const std::string& exception) {
 
 std::string ExceptionPrefix(const char* function_name) {
   return std::string(function_name) + ": ";
+}
+
+std::string BuildTimerException(const char* function_name,
+                                const char* detail) {
+  std::string message = ExceptionPrefix(function_name);
+  message.append(detail != nullptr && detail[0] != '\0' ? detail
+                                                        : "unknown exception");
+  return message;
+}
+
+void ReportTimerException(const std::shared_ptr<WasmModuleTimerState>& state,
+                          const char* function_name, const char* detail) {
+  if (state && state->context != nullptr) {
+    state->context->ReportError(BuildTimerException(function_name, detail));
+  }
+}
+
+void InvokeWasmTimerCallback(
+    const std::shared_ptr<WasmModuleTimerState>& state,
+    uint32_t callback_index, uint32_t timer_id, const char* function_name) {
+  if (!state || state->module_inst == nullptr || state->context == nullptr) {
+    return;
+  }
+
+  wasm_exec_env_t callback_env =
+      wasm_runtime_create_exec_env(state->module_inst, kTimerCallbackStackSize);
+  if (callback_env == nullptr) {
+    ReportTimerException(state, function_name,
+                         "failed to create callback exec env");
+    return;
+  }
+
+  SetEngineHostContext(callback_env, state->context);
+  uint32_t argv[] = {timer_id};
+  if (!wasm_runtime_call_indirect(callback_env, callback_index,
+                                  static_cast<uint32_t>(std::size(argv)),
+                                  argv)) {
+    ReportTimerException(
+        state, function_name,
+        wasm_runtime_get_exception(state->module_inst));
+  }
+  wasm_runtime_destroy_exec_env(callback_env);
+}
+
+std::unique_ptr<base::TimedTaskManager>& EnsureTimerManager(
+    const std::shared_ptr<WasmModuleTimerState>& state) {
+  if (!state->timer_manager) {
+    state->timer_manager = std::make_unique<base::TimedTaskManager>();
+  }
+  return state->timer_manager;
+}
+
+void DeferEraseFinishedWasmModuleTimerState(
+    const std::shared_ptr<WasmModuleTimerState>& state) {
+  if (!state || !state->entry_finished || !state->timers.empty() ||
+      state->cleanup_scheduled) {
+    return;
+  }
+  state->cleanup_scheduled = true;
+  EnsureTimerManager(state)->SetTimeout(
+      [state]() {
+        state->cleanup_scheduled = false;
+        MaybeEraseFinishedWasmModuleTimerState(state);
+      },
+      0);
+}
+
+uint32_t ScheduleWasmTimer(wasm_exec_env_t exec_env, uint32_t callback_index,
+                           int64_t delay_ms, bool is_interval,
+                           const char* function_name) {
+  if (callback_index == 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " callback function pointer is null");
+    return 0;
+  }
+
+  auto* module_inst = wasm_runtime_get_module_inst(exec_env);
+  auto state = GetWasmModuleTimerState(module_inst);
+  if (!state) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " missing WAMR module timer state");
+    return 0;
+  }
+
+  auto timer_id_holder = std::make_shared<uint32_t>(0);
+  auto task = [state, callback_index, timer_id_holder, is_interval,
+               function_name]() {
+    const uint32_t timer_id = *timer_id_holder;
+    InvokeWasmTimerCallback(state, callback_index, timer_id, function_name);
+    if (!is_interval) {
+      state->timers.erase(timer_id);
+      MaybeEraseFinishedWasmModuleTimerState(state);
+    }
+  };
+
+  uint32_t timer_id = 0;
+  const int64_t normalized_delay = delay_ms < 0 ? 0 : delay_ms;
+  if (is_interval) {
+    timer_id = EnsureTimerManager(state)->SetInterval(std::move(task),
+                                                      normalized_delay);
+  } else {
+    timer_id = EnsureTimerManager(state)->SetTimeout(std::move(task),
+                                                     normalized_delay);
+  }
+  *timer_id_holder = timer_id;
+  state->timers.emplace(timer_id);
+  return timer_id;
+}
+
+void ClearWasmTimer(wasm_exec_env_t exec_env, uint32_t timer_id,
+                    const char* function_name) {
+  if (timer_id == 0) {
+    return;
+  }
+  auto* module_inst = wasm_runtime_get_module_inst(exec_env);
+  auto state = GetWasmModuleTimerState(module_inst);
+  if (!state) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " missing WAMR module timer state");
+    return;
+  }
+  if (state->timer_manager) {
+    state->timer_manager->StopTask(timer_id);
+  }
+  state->timers.erase(timer_id);
+  DeferEraseFinishedWasmModuleTimerState(state);
+}
+
+uint32_t DecodeTimerId(uint64_t raw_timer_id) {
+  int64_t timer_id = static_cast<int64_t>(raw_timer_id);
+  if (timer_id <= 0 ||
+      timer_id > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+    return 0;
+  }
+  return static_cast<uint32_t>(timer_id);
+}
+
+void SetTimeoutHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  const uint32_t callback_index = static_cast<uint32_t>(raw_args[0]);
+  const int64_t delay_ms = static_cast<int64_t>(raw_args[1]);
+  raw_args[0] = ScheduleWasmTimer(exec_env, callback_index, delay_ms, false,
+                                  tasm::kSetTimeout);
+}
+
+void SetIntervalHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  const uint32_t callback_index = static_cast<uint32_t>(raw_args[0]);
+  const int64_t delay_ms = static_cast<int64_t>(raw_args[1]);
+  raw_args[0] = ScheduleWasmTimer(exec_env, callback_index, delay_ms, true,
+                                  tasm::kSetInterval);
+}
+
+void ClearTimeoutHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  ClearWasmTimer(exec_env, DecodeTimerId(raw_args[0]), tasm::kClearTimeout);
+}
+
+void ClearIntervalHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  ClearWasmTimer(exec_env, DecodeTimerId(raw_args[0]),
+                 tasm::kClearTimeInterval);
 }
 
 bool ValidateAppMemory(wasm_exec_env_t exec_env, int32_t app_offset,
@@ -773,16 +1018,6 @@ BINDING(kInvokeUIMethodBinding, tasm::kCFunctionInvokeUIMethod,
 BINDING(kGetComputedStyleByKeyBinding,
         tasm::kCFunctionGetComputedStyleByKey, FiberGetComputedStyleByKey,
         WasmReturnKind::kAny, kRefStringArgs);
-ARG_LIST(kTimerArgs, WasmArgKind::kExternRef, WasmArgKind::kI64);
-BINDING(kSetTimeoutBinding, tasm::kSetTimeout, SetTimeout,
-        WasmReturnKind::kI64, kTimerArgs);
-ARG_LIST(kTimerIDArgs, WasmArgKind::kI64);
-BINDING(kClearTimeoutBinding, tasm::kClearTimeout, ClearTimeout,
-        WasmReturnKind::kVoid, kTimerIDArgs);
-BINDING(kSetIntervalBinding, tasm::kSetInterval, SetInterval,
-        WasmReturnKind::kI64, kTimerArgs);
-BINDING(kClearIntervalBinding, tasm::kClearTimeInterval, ClearTimeInterval,
-        WasmReturnKind::kVoid, kTimerIDArgs);
 
 #undef BINDING0_WITH_CREATE_ARGS
 #undef BINDING0
@@ -795,6 +1030,7 @@ BINDING(kClearIntervalBinding, tasm::kClearTimeInterval, ClearTimeInterval,
 #define WASM_BOOL "i"
 #define WASM_STRING "ii"
 #define WASM_REF "r"
+#define WASM_FUNC_REF "i"
 #define WASM_ANY "iFiir"
 #define WASM_STRING_OUT "ii"
 #define WASM_ANY_OUT "iii"
@@ -803,6 +1039,9 @@ BINDING(kClearIntervalBinding, tasm::kClearTimeInterval, ClearTimeInterval,
 #define SYMBOL(binding, signature)                                      \
   { binding.name, reinterpret_cast<void*>(EngineHostFunction), signature, \
     const_cast<BindingDescriptor*>(&binding) }
+
+#define CUSTOM_SYMBOL(symbol, function, signature) \
+  { symbol, reinterpret_cast<void*>(function), signature, nullptr }
 
 NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kCreateElementBinding, SIG(WASM_STRING, WASM_REF)),
@@ -881,17 +1120,23 @@ NativeSymbol g_engine_host_symbols[] = {
            SIG(WASM_REF WASM_STRING WASM_REF WASM_REF, "")),
     SYMBOL(kGetComputedStyleByKeyBinding,
            SIG(WASM_REF WASM_STRING WASM_ANY_OUT, WASM_REF)),
-    SYMBOL(kSetTimeoutBinding, SIG(WASM_REF WASM_I64, WASM_I64)),
-    SYMBOL(kClearTimeoutBinding, SIG(WASM_I64, "")),
-    SYMBOL(kSetIntervalBinding, SIG(WASM_REF WASM_I64, WASM_I64)),
-    SYMBOL(kClearIntervalBinding, SIG(WASM_I64, "")),
+    CUSTOM_SYMBOL(tasm::kSetTimeout, SetTimeoutHostFunction,
+                  SIG(WASM_FUNC_REF WASM_I64, WASM_I64)),
+    CUSTOM_SYMBOL(tasm::kClearTimeout, ClearTimeoutHostFunction,
+                  SIG(WASM_I64, "")),
+    CUSTOM_SYMBOL(tasm::kSetInterval, SetIntervalHostFunction,
+                  SIG(WASM_FUNC_REF WASM_I64, WASM_I64)),
+    CUSTOM_SYMBOL(tasm::kClearTimeInterval, ClearIntervalHostFunction,
+                  SIG(WASM_I64, "")),
 };
 
+#undef CUSTOM_SYMBOL
 #undef SYMBOL
 #undef SIG
 #undef WASM_ANY_OUT
 #undef WASM_STRING_OUT
 #undef WASM_ANY
+#undef WASM_FUNC_REF
 #undef WASM_REF
 #undef WASM_STRING
 #undef WASM_BOOL
@@ -908,6 +1153,68 @@ bool RegisterEngineHostFunctions() {
   return wasm_runtime_register_natives_raw(
       kEngineHostModuleName, g_engine_host_symbols,
       static_cast<uint32_t>(std::size(g_engine_host_symbols)));
+}
+
+void RegisterEngineHostModule(wasm_module_t module,
+                              wasm_module_inst_t module_inst,
+                              MTSContext* context) {
+  auto state = std::make_shared<WasmModuleTimerState>(module, module_inst,
+                                                      context);
+  std::lock_guard<std::mutex> lock(WasmModuleTimerStatesMutex());
+  auto& states = WasmModuleTimerStates();
+  auto old_state = states.find(module_inst);
+  if (old_state != states.end() && old_state->second) {
+    old_state->second->Shutdown();
+  }
+  states[module_inst] = std::move(state);
+}
+
+void FinishEngineHostModule(wasm_module_inst_t module_inst) {
+  auto state = GetWasmModuleTimerState(module_inst);
+  if (!state) {
+    return;
+  }
+  state->entry_finished = true;
+  MaybeEraseFinishedWasmModuleTimerState(state);
+}
+
+void DestroyEngineHostModule(wasm_module_inst_t module_inst) {
+  std::shared_ptr<WasmModuleTimerState> state;
+  {
+    std::lock_guard<std::mutex> lock(WasmModuleTimerStatesMutex());
+    auto& states = WasmModuleTimerStates();
+    auto iter = states.find(module_inst);
+    if (iter == states.end()) {
+      return;
+    }
+    state = std::move(iter->second);
+    states.erase(iter);
+  }
+  if (state) {
+    state->Shutdown();
+  }
+  state.reset();
+}
+
+void DestroyEngineHostModulesForContext(MTSContext* context) {
+  std::vector<std::shared_ptr<WasmModuleTimerState>> states_to_destroy;
+  {
+    std::lock_guard<std::mutex> lock(WasmModuleTimerStatesMutex());
+    auto& states = WasmModuleTimerStates();
+    for (auto iter = states.begin(); iter != states.end();) {
+      if (iter->second && iter->second->context == context) {
+        states_to_destroy.emplace_back(std::move(iter->second));
+        iter = states.erase(iter);
+      } else {
+        ++iter;
+      }
+    }
+  }
+  for (auto& state : states_to_destroy) {
+    if (state) {
+      state->Shutdown();
+    }
+  }
 }
 
 void SetEngineHostContext(wasm_exec_env_t exec_env, MTSContext* context) {
