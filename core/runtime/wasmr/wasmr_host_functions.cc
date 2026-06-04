@@ -19,6 +19,9 @@
 
 #include "base/include/thread/timed_task.h"
 #include "base/include/value/base_value.h"
+#include "core/event/event.h"
+#include "core/renderer/dom/fiber/fiber_element.h"
+#include "core/renderer/events/closure_event_listener.h"
 #include "core/renderer/utils/base/tasm_constants.h"
 #include "core/runtime/lepus/bindings/renderer.h"
 #include "core/runtime/lepus/bindings/renderer_functions.h"
@@ -96,6 +99,7 @@ struct WasmModuleTimerState {
       timer_manager.reset();
     }
     timers.clear();
+    event_listeners.clear();
     if (module_inst != nullptr) {
       wasm_runtime_deinstantiate(module_inst);
       module_inst = nullptr;
@@ -115,6 +119,7 @@ struct WasmModuleTimerState {
   bool cleanup_scheduled = false;
   std::unique_ptr<base::TimedTaskManager> timer_manager;
   std::unordered_set<uint32_t> timers;
+  std::unordered_set<uint64_t> event_listeners;
 };
 
 std::mutex& ExternRefRegistryMutex() {
@@ -153,7 +158,8 @@ std::shared_ptr<WasmModuleTimerState> GetWasmModuleTimerState(
 
 void MaybeEraseFinishedWasmModuleTimerState(
     const std::shared_ptr<WasmModuleTimerState>& state) {
-  if (!state || !state->entry_finished || !state->timers.empty()) {
+  if (!state || !state->entry_finished || !state->timers.empty() ||
+      !state->event_listeners.empty()) {
     return;
   }
 
@@ -254,7 +260,7 @@ std::unique_ptr<base::TimedTaskManager>& EnsureTimerManager(
 void DeferEraseFinishedWasmModuleTimerState(
     const std::shared_ptr<WasmModuleTimerState>& state) {
   if (!state || !state->entry_finished || !state->timers.empty() ||
-      state->cleanup_scheduled) {
+      !state->event_listeners.empty() || state->cleanup_scheduled) {
     return;
   }
   state->cleanup_scheduled = true;
@@ -524,6 +530,186 @@ class RawArgReader {
  private:
   uint64_t* current_;
 };
+
+uint64_t MakeWasmEventListenerKey(uint32_t callback_index,
+                                  uint32_t listener_id) {
+  return (static_cast<uint64_t>(callback_index) << 32) | listener_id;
+}
+
+void InvokeWasmEventCallback(
+    const std::shared_ptr<WasmModuleTimerState>& state,
+    uint32_t callback_index, uint32_t listener_id,
+    fml::RefPtr<event::Event> event, const char* function_name) {
+  if (!state || state->module_inst == nullptr || state->context == nullptr) {
+    return;
+  }
+
+  wasm_exec_env_t callback_env =
+      wasm_runtime_create_exec_env(state->module_inst, kTimerCallbackStackSize);
+  if (callback_env == nullptr) {
+    ReportTimerException(state, function_name,
+                         "failed to create callback exec env");
+    return;
+  }
+
+  SetEngineHostContext(callback_env, state->context);
+  uintptr_t target_ref = kNullExternRef;
+  if (event && event->target()) {
+    event::EventTarget* target = event->target().get();
+    if (target->target_type() ==
+        event::EventTarget::EventTargetType::kElement) {
+      auto* element = static_cast<tasm::Element*>(target);
+      target_ref = ToExternRef(
+          callback_env, lepus::Value(fml::RefPtr<tasm::Element>(element)),
+          function_name);
+      if (target_ref == kInvalidExternRef) {
+        ReportTimerException(state, function_name,
+                             wasm_runtime_get_exception(state->module_inst));
+        wasm_runtime_destroy_exec_env(callback_env);
+        return;
+      }
+    }
+  }
+
+  uint32_t argv[] = {listener_id, static_cast<uint32_t>(target_ref)};
+  if (!wasm_runtime_call_indirect(callback_env, callback_index,
+                                  static_cast<uint32_t>(std::size(argv)),
+                                  argv)) {
+    ReportTimerException(
+        state, function_name,
+        wasm_runtime_get_exception(state->module_inst));
+  }
+  wasm_runtime_destroy_exec_env(callback_env);
+}
+
+class WasmEventListener : public event::ClosureEventListener {
+ public:
+  WasmEventListener(std::shared_ptr<WasmModuleTimerState> state,
+                    uint32_t callback_index, uint32_t listener_id,
+                    const event::EventListener::Options& options)
+      : event::ClosureEventListener(
+            [](lepus::Value) {}, options,
+            event::ClosureEventListener::ClosureType::kClient,
+            lepus::Value(std::string("wasmr:") +
+                         std::to_string(callback_index) + ":" +
+                         std::to_string(listener_id))),
+        state_(std::move(state)),
+        callback_index_(callback_index),
+        listener_id_(listener_id) {}
+
+  void Invoke(fml::RefPtr<event::Event> event) override {
+    InvokeWasmEventCallback(state_, callback_index_, listener_id_,
+                            std::move(event), tasm::kCFunctionAddEventListener);
+  }
+
+ private:
+  std::shared_ptr<WasmModuleTimerState> state_;
+  uint32_t callback_index_ = 0;
+  uint32_t listener_id_ = 0;
+};
+
+fml::RefPtr<tasm::FiberElement> ReadFiberElement(
+    wasm_exec_env_t exec_env, uintptr_t element_ref,
+    const char* function_name, bool* ok) {
+  lepus::Value element_value =
+      FromExternRef(exec_env, element_ref, function_name, ok);
+  if (!*ok) {
+    return nullptr;
+  }
+  if (!element_value.IsRefCounted() ||
+      element_value.RefCounted()->GetRefType() != lepus::RefType::kElement) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " element externref is not a FiberElement");
+    *ok = false;
+    return nullptr;
+  }
+  return fml::static_ref_ptr_cast<tasm::FiberElement>(
+      element_value.RefCounted());
+}
+
+void AddEventListenerHostFunction(wasm_exec_env_t exec_env,
+                                  uint64_t* raw_args) {
+  const char* const kFunctionName = tasm::kCFunctionAddEventListener;
+  RawArgReader reader(raw_args);
+  bool ok = true;
+  auto element =
+      ReadFiberElement(exec_env, reader.ReadExternRef(), kFunctionName, &ok);
+  if (!ok) {
+    return;
+  }
+  lepus::Value event_type_value =
+      ReadUtf8String(exec_env, reader.ReadI32(), reader.ReadI32(),
+                     kFunctionName, &ok);
+  if (!ok) {
+    return;
+  }
+  const std::string event_type = event_type_value.StdString();
+  const uint32_t callback_index = static_cast<uint32_t>(reader.ReadI32());
+  const uint32_t listener_id = static_cast<uint32_t>(reader.ReadI32());
+  const bool passive = reader.ReadI32() != 0;
+  if (callback_index == 0 || listener_id == 0) {
+    SetException(exec_env, ExceptionPrefix(kFunctionName) +
+                               " callback and listener id must be non-zero");
+    return;
+  }
+
+  auto state = GetWasmModuleTimerState(wasm_runtime_get_module_inst(exec_env));
+  if (!state) {
+    SetException(exec_env, ExceptionPrefix(kFunctionName) +
+                               " missing WAMR module timer state");
+    return;
+  }
+
+  element->SetJSEventHandler(base::String(event_type), base::String(),
+                             base::String());
+  const auto key = MakeWasmEventListenerKey(callback_index, listener_id);
+  const bool added = element->AddEventListener(
+      event_type, std::make_shared<WasmEventListener>(
+                      state, callback_index, listener_id,
+                      event::EventListener::Options(false, false, passive,
+                                                    false, false, false)));
+  if (added) {
+    state->event_listeners.emplace(key);
+  }
+}
+
+void RemoveEventListenerHostFunction(wasm_exec_env_t exec_env,
+                                     uint64_t* raw_args) {
+  const char* const kFunctionName = tasm::kCFunctionFiberRemoveEventListener;
+  RawArgReader reader(raw_args);
+  bool ok = true;
+  auto element =
+      ReadFiberElement(exec_env, reader.ReadExternRef(), kFunctionName, &ok);
+  if (!ok) {
+    return;
+  }
+  lepus::Value event_type_value =
+      ReadUtf8String(exec_env, reader.ReadI32(), reader.ReadI32(),
+                     kFunctionName, &ok);
+  if (!ok) {
+    return;
+  }
+  const std::string event_type = event_type_value.StdString();
+  const uint32_t callback_index = static_cast<uint32_t>(reader.ReadI32());
+  const uint32_t listener_id = static_cast<uint32_t>(reader.ReadI32());
+  const bool passive = reader.ReadI32() != 0;
+  auto state = GetWasmModuleTimerState(wasm_runtime_get_module_inst(exec_env));
+  if (!state) {
+    SetException(exec_env, ExceptionPrefix(kFunctionName) +
+                               " missing WAMR module timer state");
+    return;
+  }
+
+  element->RemoveEvent(base::String(event_type), base::String());
+  element->RemoveEventListener(
+      event_type, std::make_shared<WasmEventListener>(
+                      state, callback_index, listener_id,
+                      event::EventListener::Options(false, false, passive,
+                                                    false, false, false)));
+  state->event_listeners.erase(
+      MakeWasmEventListenerKey(callback_index, listener_id));
+  DeferEraseFinishedWasmModuleTimerState(state);
+}
 
 lepus::Value ReadAnyValue(wasm_exec_env_t exec_env, RawArgReader* reader,
                           const char* function_name, bool* ok) {
@@ -959,8 +1145,8 @@ BINDING(kSetDatasetBinding, tasm::kCFunctionSetDataset, FiberSetDataset,
 BINDING(kGetDatasetBinding, tasm::kCFunctionGetDataset, FiberGetDataset,
         WasmReturnKind::kExternRef, kOneRefArgs);
 ARG_LIST(kTwoAnyArgs, WasmArgKind::kAny, WasmArgKind::kAny);
-BINDING(kFlushElementTreeBinding, tasm::kCFunctionFlushElementTree,
-        FiberFlushElementTree, WasmReturnKind::kVoid, kTwoAnyArgs);
+BINDING0(kFlushElementTreeBinding, tasm::kCFunctionFlushElementTree,
+         FiberFlushElementTree, WasmReturnKind::kVoid);
 ARG_LIST(kReportErrorArgs, WasmArgKind::kAny, WasmArgKind::kAny);
 BINDING(kReportErrorBinding, tasm::kCFunctionReportError, ReportError,
         WasmReturnKind::kVoid, kReportErrorArgs);
@@ -1029,9 +1215,11 @@ BINDING(kGetComputedStyleByKeyBinding,
 #define WASM_I64 "I"
 #define WASM_BOOL "i"
 #define WASM_STRING "ii"
-#define WASM_REF "r"
+// Rust's wasm32-wasip1 target cannot declare externref imports without
+// wasm-bindgen today, so the guest carries WAMR externref table indices as i32.
+#define WASM_REF "i"
 #define WASM_FUNC_REF "i"
-#define WASM_ANY "iFiir"
+#define WASM_ANY "iFiii"
 #define WASM_STRING_OUT "ii"
 #define WASM_ANY_OUT "iii"
 #define SIG(args, result) "(" args ")" result
@@ -1089,7 +1277,7 @@ NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kAddDatasetBinding, SIG(WASM_REF WASM_STRING WASM_ANY, "")),
     SYMBOL(kSetDatasetBinding, SIG(WASM_REF WASM_ANY, "")),
     SYMBOL(kGetDatasetBinding, SIG(WASM_REF, WASM_REF)),
-    SYMBOL(kFlushElementTreeBinding, SIG(WASM_ANY WASM_ANY, "")),
+    SYMBOL(kFlushElementTreeBinding, SIG("", "")),
     SYMBOL(kReportErrorBinding, SIG(WASM_ANY WASM_ANY, "")),
     SYMBOL(kGetDataByKeyBinding, SIG(WASM_REF WASM_STRING WASM_ANY_OUT,
                                      WASM_REF)),
@@ -1107,10 +1295,13 @@ NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kGetAttributeNamesBinding, SIG(WASM_REF, WASM_REF)),
     SYMBOL(kGetPageElementBinding, SIG("", WASM_REF)),
     SYMBOL(kGetElementByUniqueIDBinding, SIG(WASM_I64, WASM_REF)),
-    SYMBOL(kAddEventListenerBinding,
-           SIG(WASM_REF WASM_STRING WASM_REF WASM_REF, "")),
-    SYMBOL(kRemoveEventListenerBinding,
-           SIG(WASM_REF WASM_STRING WASM_REF WASM_REF, "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionAddEventListener, AddEventListenerHostFunction,
+                  SIG(WASM_REF WASM_STRING WASM_FUNC_REF WASM_I32 WASM_BOOL,
+                      "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionFiberRemoveEventListener,
+                  RemoveEventListenerHostFunction,
+                  SIG(WASM_REF WASM_STRING WASM_FUNC_REF WASM_I32 WASM_BOOL,
+                      "")),
     SYMBOL(kCreateEventBinding,
            SIG(WASM_I32 WASM_STRING WASM_REF WASM_REF, WASM_REF)),
     SYMBOL(kDispatchEventBinding, SIG(WASM_REF WASM_REF, WASM_BOOL)),

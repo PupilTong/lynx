@@ -1,3 +1,9 @@
 [submodule "rust/yew"]
 	path = rust/yew
 	url = https://github.com/PupilTong/yew.git
+[submodule "third_party/wasmr/src"]
+	path = third_party/wasmr/src
+	url = https://github.com/PupilTong/wasm-micro-runtime.git
+[submodule "third_party/simde"]
+	path = third_party/simde
+	url = https://github.com/simd-everywhere/simde.git

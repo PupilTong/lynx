@@ -353,6 +353,7 @@ bool TemplateEntry::InitWithWasmTemplate(
   }
   page_config->SetEnableLepusNG(true);
   page_config->SetEnableFiberArch(true);
+  page_config->SetEnableEventHandleRefactor(true);
   page_config->SetLynxAirMode(CompileOptionAirMode::AIR_MODE_FIBER);
 
   if (is_card_) {

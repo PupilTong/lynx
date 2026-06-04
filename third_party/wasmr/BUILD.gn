@@ -8,6 +8,7 @@ _wasmr_root = "src"
 _wasmr_core = "$_wasmr_root/core"
 _wasmr_iwasm = "$_wasmr_core/iwasm"
 _wasmr_shared = "$_wasmr_core/shared"
+_simde_root = "../simde"
 
 config("wasmr_public_config") {
   include_dirs = [ "$_wasmr_iwasm/include" ]
@@ -92,7 +93,7 @@ if (enable_wasmr) {
       "BUILD_TARGET=\"AARCH64\"",
     ]
     _wasmr_invoke_native_source =
-        "$_wasmr_iwasm/common/arch/invokeNative_aarch64.s"
+        "$_wasmr_iwasm/common/arch/invokeNative_aarch64_simd.s"
   } else if (target_cpu == "arm") {
     _wasmr_target_defines = [
       "BUILD_TARGET_ARM",
@@ -105,10 +106,10 @@ if (enable_wasmr) {
       "BUILD_TARGET=\"X86_64\"",
     ]
     _wasmr_invoke_native_source =
-        "$_wasmr_iwasm/common/arch/invokeNative_em64.s"
+        "$_wasmr_iwasm/common/arch/invokeNative_em64_simd.s"
     if (is_win) {
       _wasmr_windows_invoke_native_source =
-          "$_wasmr_iwasm/common/arch/invokeNative_em64.asm"
+          "$_wasmr_iwasm/common/arch/invokeNative_em64_simd.asm"
     }
   } else if (target_cpu == "x86") {
     _wasmr_target_defines = [
@@ -134,6 +135,7 @@ if (enable_wasmr) {
     include_dirs = [
       "$_wasmr_iwasm/interpreter",
       "$_wasmr_iwasm/libraries/libc-builtin",
+      "$_simde_root",
       "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/include",
       "$_wasmr_iwasm/libraries/libc-wasi/sandboxed-system-primitives/src",
       "$_wasmr_iwasm/common",
@@ -149,7 +151,7 @@ if (enable_wasmr) {
                 "BH_MALLOC=wasm_runtime_malloc",
                 "WASM_CONFIGURABLE_BOUNDS_CHECKS=0",
                 "WASM_DISABLE_HW_BOUND_CHECK=0",
-                "WASM_DISABLE_STACK_HW_BOUND_CHECK=0",
+                "WASM_DISABLE_STACK_HW_BOUND_CHECK=1",
                 "WASM_DISABLE_WAKEUP_BLOCKING_OP=0",
                 "WASM_DISABLE_WRITE_GS_BASE=1",
                 "WASM_ENABLE_AOT=0",
@@ -177,8 +179,9 @@ if (enable_wasmr) {
                 "WASM_ENABLE_REF_TYPES=1",
                 "WASM_ENABLE_SHARED_MEMORY=0",
                 "WASM_ENABLE_SHRUNK_MEMORY=1",
-                "WASM_ENABLE_SIMD=0",
-                "WASM_ENABLE_SIMDE=0",
+                "WASM_ENABLE_SIMD=1",
+                "WASM_ENABLE_SIMDE=1",
+                "WASM_ENABLE_TAIL_CALL=1",
                 "WASM_ENABLE_THREAD_MGR=0",
                 "WASM_GLOBAL_HEAP_SIZE=10485760",
               ] + _wasmr_platform_defines + _wasmr_target_defines

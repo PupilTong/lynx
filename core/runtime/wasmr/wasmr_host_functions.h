@@ -19,9 +19,9 @@ namespace wasmr {
 constexpr const char kEngineHostModuleName[] = "env";
 
 // Dynamic `any` input slots use five wasm ABI values:
-//   i32 kind, f64 number_payload, i32 string_ptr, i32 string_len, externref ref.
+//   i32 kind, f64 number_payload, i32 string_ptr, i32 string_len, i32 ref.
 // `null` and `undefined` are represented by the kind tag. String payloads use
-// wasm linear memory. Non-copyable values use the externref payload.
+// wasm linear memory. Non-copyable values use the WAMR externref index payload.
 enum class WasmHostValueKind : int32_t {
   kUndefined = 0,
   kNull = 1,
@@ -34,7 +34,7 @@ enum class WasmHostValueKind : int32_t {
 // Dynamic `any` return slots append three wasm ABI values:
 //   i32 out_value_ptr, i32 out_string_ptr, i32 out_string_max_len.
 // The native function fills this descriptor at out_value_ptr and returns an
-// externref only when kind is kExternRef.
+// WAMR externref index only when kind is kExternRef.
 struct WasmHostValueOut {
   int32_t kind;
   int32_t bool_value;
@@ -46,7 +46,7 @@ struct WasmHostValueOut {
 // Registers Lynx engine APIs imported by wasm modules under the `env` module.
 // Primitive number, bool, string, and null values are copied across the ABI;
 // objects, elements, callbacks, arrays, maps, and other non-copyable values use
-// externref handles owned by the WAMR runtime.
+// WAMR externref handles owned by the WAMR runtime.
 bool RegisterEngineHostFunctions();
 
 // Keeps a loaded WAMR module instance alive for callbacks that can re-enter the
