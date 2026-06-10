@@ -286,10 +286,12 @@ TaskRunnerManufactor::TaskRunnerManufactor(ThreadStrategyForRendering strategy,
                                            bool enable_multi_layout_thread,
                                            bool enable_vsync_aligned_msg_loop,
                                            bool enable_async_thread_cache,
-                                           std::string js_group_thread_name)
+                                           std::string js_group_thread_name,
+                                           bool enable_js_thread)
     : thread_strategy_(strategy),
       enable_multi_tasm_thread_(enable_multi_tasm_thread),
-      js_group_thread_name_(std::move(js_group_thread_name)) {
+      js_group_thread_name_(std::move(js_group_thread_name)),
+      enable_js_thread_(enable_js_thread) {
   LOGI("TaskRunnerManufactor setThreadStrategy:"
        << strategy << ", multi_tasm:" << enable_multi_tasm_thread
        << ", async_thread_cache:" << enable_async_thread_cache);
@@ -299,27 +301,27 @@ TaskRunnerManufactor::TaskRunnerManufactor(ThreadStrategyForRendering strategy,
   switch (strategy) {
     case ALL_ON_UI: {
       StartUIThread(enable_vsync_aligned_msg_loop);
-      StartJSThread();
+      StartJSThreadIfNeeded();
       CreateTASMRunner(ui_task_runner_->GetLoop(),
                        enable_vsync_aligned_msg_loop);
       layout_task_runner_ = tasm_task_runner_;
     } break;
     case MOST_ON_TASM: {
       StartUIThread(enable_vsync_aligned_msg_loop);
-      StartJSThread();
+      StartJSThreadIfNeeded();
       CreateTASMRunner(StartTASMThread(), enable_vsync_aligned_msg_loop);
       layout_task_runner_ = tasm_task_runner_;
     } break;
     case PART_ON_LAYOUT: {
       StartUIThread(enable_vsync_aligned_msg_loop);
-      StartJSThread();
+      StartJSThreadIfNeeded();
       CreateTASMRunner(ui_task_runner_->GetLoop(),
                        enable_vsync_aligned_msg_loop);
       StartLayoutThread(enable_multi_layout_thread);
     } break;
     case MULTI_THREADS: {
       StartUIThread(enable_vsync_aligned_msg_loop);
-      StartJSThread();
+      StartJSThreadIfNeeded();
       CreateTASMRunner(StartTASMThread(), enable_vsync_aligned_msg_loop);
       StartLayoutThread(enable_multi_layout_thread);
     } break;
@@ -435,6 +437,13 @@ void TaskRunnerManufactor::StartJSThread() {
 #else
   js_task_runner_ = GetJSRunner(js_group_thread_name_);
 #endif
+}
+
+void TaskRunnerManufactor::StartJSThreadIfNeeded() {
+  if (!enable_js_thread_) {
+    return;
+  }
+  StartJSThread();
 }
 
 fml::Thread TaskRunnerManufactor::CreateJSWorkerThread(

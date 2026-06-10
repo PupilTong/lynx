@@ -67,7 +67,8 @@ class TaskRunnerManufactor {
                        bool enable_multi_layout_thread,
                        bool enable_vsync_aligned_msg_loop = false,
                        bool enable_async_thread_cache = false,
-                       std::string js_group_thread_name = "");
+                       std::string js_group_thread_name = "",
+                       bool enable_js_thread = true);
 
   virtual ~TaskRunnerManufactor() = default;
 
@@ -110,6 +111,7 @@ class TaskRunnerManufactor {
   void StartLayoutThread(bool enable_multi_layout_thread);
 
   void StartJSThread();
+  void StartJSThreadIfNeeded();
 
   void CreateTASMRunner(fml::RefPtr<fml::MessageLoopImpl> loop,
                         bool enable_vsync_aligned_msg_loop);
@@ -133,6 +135,7 @@ class TaskRunnerManufactor {
   bool enable_multi_tasm_thread_;
 
   std::string js_group_thread_name_;
+  bool enable_js_thread_;
 
   size_t label_;
 };

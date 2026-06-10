@@ -255,7 +255,8 @@ jlong Create(JNIEnv* env, jclass jcaller, jlong runtime_wrapper_ptr,
              jboolean force_layout_on_background_thread,
              jboolean enable_unified_pipeline, jint embedded_mode,
              jboolean has_logic_executor, jboolean debuggable,
-             jlong engine_wrapper_ptr, jobject module_factory) {
+             jboolean is_wasm_template, jlong engine_wrapper_ptr,
+             jobject module_factory) {
   auto* ui_delegate =
       reinterpret_cast<lynx::tasm::UIDelegate*>(ui_delegate_ptr);
 
@@ -271,6 +272,12 @@ jlong Create(JNIEnv* env, jclass jcaller, jlong runtime_wrapper_ptr,
   auto* runtime_wrapper =
       reinterpret_cast<lynx::shell::LynxRuntimeWrapperAndroid*>(
           runtime_wrapper_ptr);
+  if (is_wasm_template) {
+    runtime_wrapper = nullptr;
+    enable_js = false;
+    enable_js_group_thread = false;
+    module_factory = nullptr;
+  }
   // TODO(chenyouhui): Create LazyBundleLoader in LynxShellBuilder
   auto loader = std::make_shared<lynx::tasm::LazyBundleLoader>(
       std::make_shared<lynx::shell::LynxResourceLoaderAndroid>(
@@ -288,6 +295,7 @@ jlong Create(JNIEnv* env, jclass jcaller, jlong runtime_wrapper_ptr,
   shell_option.enable_multi_tasm_thread_ = enable_multi_async_thread;
   shell_option.enable_multi_layout_thread_ = enable_multi_async_thread;
   shell_option.enable_js_ = enable_js;
+  shell_option.enable_js_thread_ = !is_wasm_template;
   shell_option.enable_vsync_aligned_msg_loop_ = enable_vsync_aligned_msg_loop;
   shell_option.enable_async_hydration_ = enable_async_hydration;
   shell_option.enable_js_group_thread_ = enable_js_group_thread;
@@ -309,6 +317,12 @@ jlong Create(JNIEnv* env, jclass jcaller, jlong runtime_wrapper_ptr,
   if (white_board_ptr != 0) {
     white_board = *reinterpret_cast<std::shared_ptr<lynx::tasm::WhiteBoard>*>(
         white_board_ptr);
+  }
+  auto native_thread_strategy =
+      static_cast<lynx::base::ThreadStrategyForRendering>(thread_strategy);
+  if (is_wasm_template) {
+    native_thread_strategy =
+        lynx::base::ThreadStrategyForRendering::MOST_ON_TASM;
   }
 
   return reinterpret_cast<jlong>(
@@ -334,8 +348,7 @@ jlong Create(JNIEnv* env, jclass jcaller, jlong runtime_wrapper_ptr,
               (engine_wrapper && engine_wrapper->HasInit())
                   ? nullptr
                   : ui_delegate->CreateLayoutContext())
-          .SetStrategy(static_cast<lynx::base::ThreadStrategyForRendering>(
-              thread_strategy))
+          .SetStrategy(native_thread_strategy)
           .SetLynxEngineWrapper(engine_wrapper)
           .SetRuntimeActor(
               (runtime_wrapper != nullptr)
