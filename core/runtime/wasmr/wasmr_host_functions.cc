@@ -4,6 +4,7 @@
 
 #include "core/runtime/wasmr/wasmr_host_functions.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -18,10 +19,15 @@
 #include <vector>
 
 #include "base/include/thread/timed_task.h"
+#include "base/include/value/array.h"
 #include "base/include/value/base_value.h"
+#include "base/include/vector.h"
 #include "core/event/event.h"
+#include "core/event/event_dispatcher.h"
+#include "core/event/event_listener.h"
+#include "core/renderer/dom/fiber/block_element.h"
 #include "core/renderer/dom/fiber/fiber_element.h"
-#include "core/renderer/events/closure_event_listener.h"
+#include "core/renderer/dom/selector/fiber_element_selector.h"
 #include "core/renderer/utils/base/tasm_constants.h"
 #include "core/runtime/lepus/bindings/renderer.h"
 #include "core/runtime/lepus/bindings/renderer_functions.h"
@@ -32,51 +38,28 @@ namespace runtime {
 namespace wasmr {
 namespace {
 
-constexpr uintptr_t kNullExternRef = 0;
-constexpr uintptr_t kInvalidExternRef = static_cast<uintptr_t>(-1);
+constexpr int32_t kNullHostRef = -1;
 constexpr uint32_t kTimerCallbackStackSize = 64 * 1024;
 
-enum class WasmArgKind {
-  kI32,
-  kI64,
-  kF64,
-  kBool,
-  kString,
-  kExternRef,
-  kAny,
-};
+constexpr int32_t kEventFlagCapture = 1 << 0;
+constexpr int32_t kEventFlagBubbles = 1 << 1;
+constexpr int32_t kEventFlagCancelable = 1 << 2;
+constexpr int32_t kEventFlagComposed = 1 << 3;
 
-enum class WasmReturnKind {
-  kVoid,
-  kI32,
-  kI64,
-  kBool,
-  kString,
-  kExternRef,
-  kAny,
-};
+struct WasmI32 {};
+struct WasmI64 {};
+struct WasmBool {};
+struct WasmString {};
+struct WasmElementRef {};
+struct WasmVoid {};
 
-enum class HiddenCreateArgs {
-  kNone,
-  kCreateElement,
-  kCreatePage,
-  kCreateParent,
-};
+struct HiddenCreateNone {};
+struct HiddenCreateElement {};
+struct HiddenCreatePage {};
+struct HiddenCreateParent {};
 
-struct BindingDescriptor {
-  const char* name;
-  lepus::CFunction function;
-  const WasmArgKind* args;
-  size_t argc;
-  WasmReturnKind return_kind;
-  HiddenCreateArgs hidden_create_args;
-};
-
-struct EngineHostObject {
-  explicit EngineHostObject(lepus::Value&& value) : value(std::move(value)) {}
-
-  lepus::Value value;
-};
+using ElementRef = fml::RefPtr<tasm::FiberElement>;
+using EventRef = fml::RefPtr<event::Event>;
 
 struct WasmModuleTimerState {
   WasmModuleTimerState(wasm_module_t module,
@@ -99,7 +82,8 @@ struct WasmModuleTimerState {
       timer_manager.reset();
     }
     timers.clear();
-    event_listeners.clear();
+    element_refs.clear();
+    event_refs.clear();
     if (module_inst != nullptr) {
       wasm_runtime_deinstantiate(module_inst);
       module_inst = nullptr;
@@ -117,20 +101,13 @@ struct WasmModuleTimerState {
   bool is_shutdown = false;
   bool entry_finished = false;
   bool cleanup_scheduled = false;
+  int32_t next_element_ref = 0;
+  int32_t next_event_ref = 0;
   std::unique_ptr<base::TimedTaskManager> timer_manager;
   std::unordered_set<uint32_t> timers;
-  std::unordered_set<uint64_t> event_listeners;
+  std::unordered_map<int32_t, ElementRef> element_refs;
+  std::unordered_map<int32_t, EventRef> event_refs;
 };
-
-std::mutex& ExternRefRegistryMutex() {
-  static auto* mutex = new std::mutex();
-  return *mutex;
-}
-
-std::unordered_set<EngineHostObject*>& ExternRefRegistry() {
-  static auto* registry = new std::unordered_set<EngineHostObject*>();
-  return *registry;
-}
 
 std::mutex& WasmModuleTimerStatesMutex() {
   static auto* mutex = new std::mutex();
@@ -158,8 +135,7 @@ std::shared_ptr<WasmModuleTimerState> GetWasmModuleTimerState(
 
 void MaybeEraseFinishedWasmModuleTimerState(
     const std::shared_ptr<WasmModuleTimerState>& state) {
-  if (!state || !state->entry_finished || !state->timers.empty() ||
-      !state->event_listeners.empty()) {
+  if (!state || !state->entry_finished || !state->timers.empty()) {
     return;
   }
 
@@ -173,27 +149,6 @@ void MaybeEraseFinishedWasmModuleTimerState(
 
 void DeferEraseFinishedWasmModuleTimerState(
     const std::shared_ptr<WasmModuleTimerState>& state);
-
-void RegisterExternRefObject(EngineHostObject* object) {
-  std::lock_guard<std::mutex> lock(ExternRefRegistryMutex());
-  ExternRefRegistry().insert(object);
-}
-
-void UnregisterExternRefObject(EngineHostObject* object) {
-  std::lock_guard<std::mutex> lock(ExternRefRegistryMutex());
-  ExternRefRegistry().erase(object);
-}
-
-bool IsRegisteredExternRefObject(EngineHostObject* object) {
-  std::lock_guard<std::mutex> lock(ExternRefRegistryMutex());
-  return ExternRefRegistry().find(object) != ExternRefRegistry().end();
-}
-
-void DeleteEngineHostObject(void* object) {
-  auto* host_object = static_cast<EngineHostObject*>(object);
-  UnregisterExternRefObject(host_object);
-  delete host_object;
-}
 
 void SetException(wasm_exec_env_t exec_env, const char* exception) {
   wasm_runtime_set_exception(wasm_runtime_get_module_inst(exec_env), exception);
@@ -219,6 +174,178 @@ void ReportTimerException(const std::shared_ptr<WasmModuleTimerState>& state,
                           const char* function_name, const char* detail) {
   if (state && state->context != nullptr) {
     state->context->ReportError(BuildTimerException(function_name, detail));
+  }
+}
+
+std::shared_ptr<WasmModuleTimerState> GetWasmModuleState(
+    wasm_exec_env_t exec_env, const char* function_name) {
+  auto* module_inst = wasm_runtime_get_module_inst(exec_env);
+  auto state = GetWasmModuleTimerState(module_inst);
+  if (!state) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " missing WAMR module host state");
+  }
+  return state;
+}
+
+int32_t AllocateArenaId(int32_t* next_id, const char* arena_name,
+                        wasm_exec_env_t exec_env, const char* function_name) {
+  if (*next_id == std::numeric_limits<int32_t>::max()) {
+    SetException(exec_env, ExceptionPrefix(function_name) + arena_name +
+                               " arena is exhausted");
+    return kNullHostRef;
+  }
+  return (*next_id)++;
+}
+
+int32_t StoreElementRef(const std::shared_ptr<WasmModuleTimerState>& state,
+                        const ElementRef& element, wasm_exec_env_t exec_env,
+                        const char* function_name) {
+  if (!element) {
+    return kNullHostRef;
+  }
+  const int32_t id =
+      AllocateArenaId(&state->next_element_ref, " element", exec_env,
+                      function_name);
+  if (id < 0) {
+    return kNullHostRef;
+  }
+  state->element_refs.emplace(id, element);
+  return id;
+}
+
+int32_t StoreElementRef(wasm_exec_env_t exec_env, const ElementRef& element,
+                        const char* function_name) {
+  auto state = GetWasmModuleState(exec_env, function_name);
+  if (!state) {
+    return kNullHostRef;
+  }
+  return StoreElementRef(state, element, exec_env, function_name);
+}
+
+int32_t StoreElementValue(wasm_exec_env_t exec_env, lepus::Value&& value,
+                          const char* function_name) {
+  if (value.IsEmpty() || value.IsNil() || value.IsUndefined()) {
+    return kNullHostRef;
+  }
+  if (!value.IsRefCounted() ||
+      value.RefCounted()->GetRefType() != lepus::RefType::kElement) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " return value is not a FiberElement");
+    return kNullHostRef;
+  }
+  return StoreElementRef(
+      exec_env, fml::static_ref_ptr_cast<tasm::FiberElement>(
+                    value.RefCounted()),
+      function_name);
+}
+
+ElementRef GetElementRef(wasm_exec_env_t exec_env, int32_t element_id,
+                         const char* function_name, bool* ok) {
+  if (element_id < 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " element arena id is absent");
+    *ok = false;
+    return nullptr;
+  }
+  auto state = GetWasmModuleState(exec_env, function_name);
+  if (!state) {
+    *ok = false;
+    return nullptr;
+  }
+  auto iter = state->element_refs.find(element_id);
+  if (iter == state->element_refs.end()) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " element arena id is invalid");
+    *ok = false;
+    return nullptr;
+  }
+  return iter->second;
+}
+
+ElementRef GetOptionalElementRef(wasm_exec_env_t exec_env, int32_t element_id,
+                                 const char* function_name, bool* ok) {
+  if (element_id < 0) {
+    return nullptr;
+  }
+  return GetElementRef(exec_env, element_id, function_name, ok);
+}
+
+void DropElementRef(wasm_exec_env_t exec_env, int32_t element_id,
+                    const char* function_name) {
+  if (element_id < 0) {
+    return;
+  }
+  auto state = GetWasmModuleState(exec_env, function_name);
+  if (!state) {
+    return;
+  }
+  if (state->element_refs.erase(element_id) == 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " element arena id is invalid");
+  }
+}
+
+int32_t StoreEventRef(const std::shared_ptr<WasmModuleTimerState>& state,
+                      const EventRef& event, wasm_exec_env_t exec_env,
+                      const char* function_name) {
+  if (!event) {
+    return kNullHostRef;
+  }
+  const int32_t id =
+      AllocateArenaId(&state->next_event_ref, " event", exec_env,
+                      function_name);
+  if (id < 0) {
+    return kNullHostRef;
+  }
+  state->event_refs.emplace(id, event);
+  return id;
+}
+
+int32_t StoreEventRef(wasm_exec_env_t exec_env, const EventRef& event,
+                      const char* function_name) {
+  auto state = GetWasmModuleState(exec_env, function_name);
+  if (!state) {
+    return kNullHostRef;
+  }
+  return StoreEventRef(state, event, exec_env, function_name);
+}
+
+EventRef GetEventRef(wasm_exec_env_t exec_env, int32_t event_id,
+                     const char* function_name, bool* ok) {
+  if (event_id < 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " event arena id is absent");
+    *ok = false;
+    return nullptr;
+  }
+  auto state = GetWasmModuleState(exec_env, function_name);
+  if (!state) {
+    *ok = false;
+    return nullptr;
+  }
+  auto iter = state->event_refs.find(event_id);
+  if (iter == state->event_refs.end()) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " event arena id is invalid");
+    *ok = false;
+    return nullptr;
+  }
+  return iter->second;
+}
+
+void DropEventRef(wasm_exec_env_t exec_env, int32_t event_id,
+                  const char* function_name) {
+  if (event_id < 0) {
+    return;
+  }
+  auto state = GetWasmModuleState(exec_env, function_name);
+  if (!state) {
+    return;
+  }
+  if (state->event_refs.erase(event_id) == 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " event arena id is invalid");
   }
 }
 
@@ -249,6 +376,38 @@ void InvokeWasmTimerCallback(
   wasm_runtime_destroy_exec_env(callback_env);
 }
 
+void InvokeWasmEventCallback(
+    const std::shared_ptr<WasmModuleTimerState>& state,
+    uint32_t callback_index, const EventRef& event,
+    const char* function_name) {
+  if (!state || state->module_inst == nullptr || state->context == nullptr ||
+      callback_index == 0) {
+    return;
+  }
+
+  wasm_exec_env_t callback_env =
+      wasm_runtime_create_exec_env(state->module_inst, kTimerCallbackStackSize);
+  if (callback_env == nullptr) {
+    ReportTimerException(state, function_name,
+                         "failed to create event callback exec env");
+    return;
+  }
+
+  SetEngineHostContext(callback_env, state->context);
+  int32_t event_id = StoreEventRef(state, event, callback_env, function_name);
+  if (event_id >= 0) {
+    uint32_t argv[] = {static_cast<uint32_t>(event_id)};
+    if (!wasm_runtime_call_indirect(callback_env, callback_index,
+                                    static_cast<uint32_t>(std::size(argv)),
+                                    argv)) {
+      ReportTimerException(
+          state, function_name,
+          wasm_runtime_get_exception(state->module_inst));
+    }
+  }
+  wasm_runtime_destroy_exec_env(callback_env);
+}
+
 std::unique_ptr<base::TimedTaskManager>& EnsureTimerManager(
     const std::shared_ptr<WasmModuleTimerState>& state) {
   if (!state->timer_manager) {
@@ -260,7 +419,7 @@ std::unique_ptr<base::TimedTaskManager>& EnsureTimerManager(
 void DeferEraseFinishedWasmModuleTimerState(
     const std::shared_ptr<WasmModuleTimerState>& state) {
   if (!state || !state->entry_finished || !state->timers.empty() ||
-      !state->event_listeners.empty() || state->cleanup_scheduled) {
+      state->cleanup_scheduled) {
     return;
   }
   state->cleanup_scheduled = true;
@@ -365,6 +524,17 @@ void ClearIntervalHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
                  tasm::kClearTimeInterval);
 }
 
+bool CheckedByteLength(int32_t count, int32_t item_size, int32_t* out) {
+  if (count < 0 || item_size <= 0) {
+    return false;
+  }
+  if (count > std::numeric_limits<int32_t>::max() / item_size) {
+    return false;
+  }
+  *out = count * item_size;
+  return true;
+}
+
 bool ValidateAppMemory(wasm_exec_env_t exec_env, int32_t app_offset,
                        int32_t byte_length, const char* function_name,
                        const char* role) {
@@ -397,27 +567,19 @@ void* AppAddrToNative(wasm_exec_env_t exec_env, int32_t app_offset) {
       wasm_runtime_get_module_inst(exec_env), static_cast<uint64_t>(app_offset));
 }
 
-lepus::Value ReadUtf8String(wasm_exec_env_t exec_env, int32_t app_offset,
-                            int32_t byte_length, const char* function_name,
-                            bool* ok) {
+std::string ReadUtf8String(wasm_exec_env_t exec_env, int32_t app_offset,
+                           int32_t byte_length, const char* function_name,
+                           bool* ok) {
   if (!ValidateAppMemory(exec_env, app_offset, byte_length, function_name,
-                         "string")) {
+                         " string")) {
     *ok = false;
-    return lepus::Value();
+    return {};
   }
   if (byte_length == 0) {
-    return lepus::Value(std::string());
+    return {};
   }
   auto* data = static_cast<const char*>(AppAddrToNative(exec_env, app_offset));
-  return lepus::Value(std::string(data, static_cast<size_t>(byte_length)));
-}
-
-int32_t RequiredStringLength(const std::string& value) {
-  if (value.size() >
-      static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
-    return std::numeric_limits<int32_t>::max();
-  }
-  return static_cast<int32_t>(value.size());
+  return std::string(data, static_cast<size_t>(byte_length));
 }
 
 int32_t WriteUtf8String(wasm_exec_env_t exec_env, std::string_view value,
@@ -429,85 +591,24 @@ int32_t WriteUtf8String(wasm_exec_env_t exec_env, std::string_view value,
     *ok = false;
     return -1;
   }
-  int32_t required_length = value.size() >
-                                    static_cast<size_t>(
-                                        std::numeric_limits<int32_t>::max())
-                                ? std::numeric_limits<int32_t>::max()
-                                : static_cast<int32_t>(value.size());
+  int32_t required_length =
+      value.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())
+          ? std::numeric_limits<int32_t>::max()
+          : static_cast<int32_t>(value.size());
   if (required_length > out_max_length) {
-    SetException(exec_env, ExceptionPrefix(function_name) +
-                               " output string buffer is too small");
-    *ok = false;
-    return required_length;
-  }
-  if (!ValidateAppMemory(exec_env, out_offset, out_max_length, function_name,
-                         "output string")) {
-    *ok = false;
     return required_length;
   }
   if (required_length == 0) {
     return required_length;
   }
+  if (!ValidateAppMemory(exec_env, out_offset, required_length, function_name,
+                         " output string")) {
+    *ok = false;
+    return required_length;
+  }
   auto* out_data = static_cast<char*>(AppAddrToNative(exec_env, out_offset));
   std::memcpy(out_data, value.data(), static_cast<size_t>(required_length));
   return required_length;
-}
-
-uintptr_t ToExternRef(wasm_exec_env_t exec_env, lepus::Value&& value,
-                      const char* function_name) {
-  if (value.IsEmpty()) {
-    return kNullExternRef;
-  }
-
-  auto host_object = std::make_unique<EngineHostObject>(std::move(value));
-  auto* module_inst = wasm_runtime_get_module_inst(exec_env);
-  uint32_t externref_index = 0;
-  if (!wasm_externref_obj2ref(module_inst, host_object.get(),
-                              &externref_index)) {
-    SetException(exec_env, ExceptionPrefix(function_name) +
-                               " failed to create externref");
-    return kInvalidExternRef;
-  }
-
-  if (!wasm_externref_set_cleanup(module_inst, host_object.get(),
-                                  DeleteEngineHostObject)) {
-    wasm_externref_objdel(module_inst, host_object.get());
-    SetException(exec_env, ExceptionPrefix(function_name) +
-                               " failed to set externref cleanup");
-    return kInvalidExternRef;
-  }
-
-  RegisterExternRefObject(host_object.get());
-  host_object.release();
-  return externref_index;
-}
-
-lepus::Value FromExternRef(wasm_exec_env_t exec_env, uintptr_t externref,
-                           const char* function_name, bool* ok) {
-  if (externref == kNullExternRef) {
-    return lepus::Value();
-  }
-  if (externref == kInvalidExternRef) {
-    SetException(exec_env, ExceptionPrefix(function_name) +
-                               " externref is invalid");
-    *ok = false;
-    return lepus::Value();
-  }
-
-  void* extern_object = nullptr;
-  if (!wasm_externref_ref2obj(static_cast<uint32_t>(externref),
-                              &extern_object)) {
-    SetException(exec_env, ExceptionPrefix(function_name) +
-                               " failed to resolve externref");
-    *ok = false;
-    return lepus::Value();
-  }
-
-  auto* host_object = static_cast<EngineHostObject*>(extern_object);
-  if (!IsRegisteredExternRefObject(host_object)) {
-    return lepus::Value(extern_object);
-  }
-  return host_object->value;
 }
 
 class RawArgReader {
@@ -518,257 +619,36 @@ class RawArgReader {
 
   int64_t ReadI64() { return static_cast<int64_t>(*current_++); }
 
-  double ReadF64() {
-    uint64_t bits = *current_++;
-    double value = 0;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-  }
-
-  uintptr_t ReadExternRef() { return static_cast<uintptr_t>(*current_++); }
-
  private:
   uint64_t* current_;
 };
 
-uint64_t MakeWasmEventListenerKey(uint32_t callback_index,
-                                  uint32_t listener_id) {
-  return (static_cast<uint64_t>(callback_index) << 32) | listener_id;
+lepus::Value ReadHostArgument(wasm_exec_env_t, RawArgReader* reader, WasmI32,
+                              const char*, bool*) {
+  return lepus::Value(reader->ReadI32());
 }
 
-void InvokeWasmEventCallback(
-    const std::shared_ptr<WasmModuleTimerState>& state,
-    uint32_t callback_index, uint32_t listener_id,
-    fml::RefPtr<event::Event> event, const char* function_name) {
-  if (!state || state->module_inst == nullptr || state->context == nullptr) {
-    return;
-  }
-
-  wasm_exec_env_t callback_env =
-      wasm_runtime_create_exec_env(state->module_inst, kTimerCallbackStackSize);
-  if (callback_env == nullptr) {
-    ReportTimerException(state, function_name,
-                         "failed to create callback exec env");
-    return;
-  }
-
-  SetEngineHostContext(callback_env, state->context);
-  uintptr_t target_ref = kNullExternRef;
-  if (event && event->target()) {
-    event::EventTarget* target = event->target().get();
-    if (target->target_type() ==
-        event::EventTarget::EventTargetType::kElement) {
-      auto* element = static_cast<tasm::Element*>(target);
-      target_ref = ToExternRef(
-          callback_env, lepus::Value(fml::RefPtr<tasm::Element>(element)),
-          function_name);
-      if (target_ref == kInvalidExternRef) {
-        ReportTimerException(state, function_name,
-                             wasm_runtime_get_exception(state->module_inst));
-        wasm_runtime_destroy_exec_env(callback_env);
-        return;
-      }
-    }
-  }
-
-  uint32_t argv[] = {listener_id, static_cast<uint32_t>(target_ref)};
-  if (!wasm_runtime_call_indirect(callback_env, callback_index,
-                                  static_cast<uint32_t>(std::size(argv)),
-                                  argv)) {
-    ReportTimerException(
-        state, function_name,
-        wasm_runtime_get_exception(state->module_inst));
-  }
-  wasm_runtime_destroy_exec_env(callback_env);
+lepus::Value ReadHostArgument(wasm_exec_env_t, RawArgReader* reader, WasmI64,
+                              const char*, bool*) {
+  return lepus::Value(reader->ReadI64());
 }
 
-class WasmEventListener : public event::ClosureEventListener {
- public:
-  WasmEventListener(std::shared_ptr<WasmModuleTimerState> state,
-                    uint32_t callback_index, uint32_t listener_id,
-                    const event::EventListener::Options& options)
-      : event::ClosureEventListener(
-            [](lepus::Value) {}, options,
-            event::ClosureEventListener::ClosureType::kClient,
-            lepus::Value(std::string("wasmr:") +
-                         std::to_string(callback_index) + ":" +
-                         std::to_string(listener_id))),
-        state_(std::move(state)),
-        callback_index_(callback_index),
-        listener_id_(listener_id) {}
-
-  void Invoke(fml::RefPtr<event::Event> event) override {
-    InvokeWasmEventCallback(state_, callback_index_, listener_id_,
-                            std::move(event), tasm::kCFunctionAddEventListener);
-  }
-
- private:
-  std::shared_ptr<WasmModuleTimerState> state_;
-  uint32_t callback_index_ = 0;
-  uint32_t listener_id_ = 0;
-};
-
-fml::RefPtr<tasm::FiberElement> ReadFiberElement(
-    wasm_exec_env_t exec_env, uintptr_t element_ref,
-    const char* function_name, bool* ok) {
-  lepus::Value element_value =
-      FromExternRef(exec_env, element_ref, function_name, ok);
-  if (!*ok) {
-    return nullptr;
-  }
-  if (!element_value.IsRefCounted() ||
-      element_value.RefCounted()->GetRefType() != lepus::RefType::kElement) {
-    SetException(exec_env, ExceptionPrefix(function_name) +
-                               " element externref is not a FiberElement");
-    *ok = false;
-    return nullptr;
-  }
-  return fml::static_ref_ptr_cast<tasm::FiberElement>(
-      element_value.RefCounted());
+lepus::Value ReadHostArgument(wasm_exec_env_t exec_env, RawArgReader* reader,
+                              WasmString, const char* function_name,
+                              bool* ok) {
+  return lepus::Value(
+      ReadUtf8String(exec_env, reader->ReadI32(), reader->ReadI32(),
+                     function_name, ok));
 }
 
-void AddEventListenerHostFunction(wasm_exec_env_t exec_env,
-                                  uint64_t* raw_args) {
-  const char* const kFunctionName = tasm::kCFunctionAddEventListener;
-  RawArgReader reader(raw_args);
-  bool ok = true;
-  auto element =
-      ReadFiberElement(exec_env, reader.ReadExternRef(), kFunctionName, &ok);
-  if (!ok) {
-    return;
+lepus::Value ReadHostArgument(wasm_exec_env_t exec_env, RawArgReader* reader,
+                              WasmElementRef, const char* function_name,
+                              bool* ok) {
+  auto element = GetElementRef(exec_env, reader->ReadI32(), function_name, ok);
+  if (!*ok || !element) {
+    return lepus::Value();
   }
-  lepus::Value event_type_value =
-      ReadUtf8String(exec_env, reader.ReadI32(), reader.ReadI32(),
-                     kFunctionName, &ok);
-  if (!ok) {
-    return;
-  }
-  const std::string event_type = event_type_value.StdString();
-  const uint32_t callback_index = static_cast<uint32_t>(reader.ReadI32());
-  const uint32_t listener_id = static_cast<uint32_t>(reader.ReadI32());
-  const bool passive = reader.ReadI32() != 0;
-  if (callback_index == 0 || listener_id == 0) {
-    SetException(exec_env, ExceptionPrefix(kFunctionName) +
-                               " callback and listener id must be non-zero");
-    return;
-  }
-
-  auto state = GetWasmModuleTimerState(wasm_runtime_get_module_inst(exec_env));
-  if (!state) {
-    SetException(exec_env, ExceptionPrefix(kFunctionName) +
-                               " missing WAMR module timer state");
-    return;
-  }
-
-  element->SetJSEventHandler(base::String(event_type), base::String(),
-                             base::String());
-  const auto key = MakeWasmEventListenerKey(callback_index, listener_id);
-  const bool added = element->AddEventListener(
-      event_type, std::make_shared<WasmEventListener>(
-                      state, callback_index, listener_id,
-                      event::EventListener::Options(false, false, passive,
-                                                    false, false, false)));
-  if (added) {
-    state->event_listeners.emplace(key);
-  }
-}
-
-void RemoveEventListenerHostFunction(wasm_exec_env_t exec_env,
-                                     uint64_t* raw_args) {
-  const char* const kFunctionName = tasm::kCFunctionFiberRemoveEventListener;
-  RawArgReader reader(raw_args);
-  bool ok = true;
-  auto element =
-      ReadFiberElement(exec_env, reader.ReadExternRef(), kFunctionName, &ok);
-  if (!ok) {
-    return;
-  }
-  lepus::Value event_type_value =
-      ReadUtf8String(exec_env, reader.ReadI32(), reader.ReadI32(),
-                     kFunctionName, &ok);
-  if (!ok) {
-    return;
-  }
-  const std::string event_type = event_type_value.StdString();
-  const uint32_t callback_index = static_cast<uint32_t>(reader.ReadI32());
-  const uint32_t listener_id = static_cast<uint32_t>(reader.ReadI32());
-  const bool passive = reader.ReadI32() != 0;
-  auto state = GetWasmModuleTimerState(wasm_runtime_get_module_inst(exec_env));
-  if (!state) {
-    SetException(exec_env, ExceptionPrefix(kFunctionName) +
-                               " missing WAMR module timer state");
-    return;
-  }
-
-  element->RemoveEvent(base::String(event_type), base::String());
-  element->RemoveEventListener(
-      event_type, std::make_shared<WasmEventListener>(
-                      state, callback_index, listener_id,
-                      event::EventListener::Options(false, false, passive,
-                                                    false, false, false)));
-  state->event_listeners.erase(
-      MakeWasmEventListenerKey(callback_index, listener_id));
-  DeferEraseFinishedWasmModuleTimerState(state);
-}
-
-lepus::Value ReadAnyValue(wasm_exec_env_t exec_env, RawArgReader* reader,
-                          const char* function_name, bool* ok) {
-  auto kind = static_cast<WasmHostValueKind>(reader->ReadI32());
-  double number_payload = reader->ReadF64();
-  int32_t string_offset = reader->ReadI32();
-  int32_t string_length = reader->ReadI32();
-  uintptr_t externref = reader->ReadExternRef();
-
-  switch (kind) {
-    case WasmHostValueKind::kUndefined:
-      return lepus::Value(lepus::Value::kCreateAsUndefinedTag);
-    case WasmHostValueKind::kNull:
-      return lepus::Value();
-    case WasmHostValueKind::kBool:
-      return lepus::Value(number_payload != 0);
-    case WasmHostValueKind::kNumber:
-      return lepus::Value(number_payload);
-    case WasmHostValueKind::kString:
-      return ReadUtf8String(exec_env, string_offset, string_length,
-                            function_name, ok);
-    case WasmHostValueKind::kExternRef:
-      return FromExternRef(exec_env, externref, function_name, ok);
-  }
-
-  SetException(exec_env, ExceptionPrefix(function_name) +
-                             " unknown dynamic value kind");
-  *ok = false;
-  return lepus::Value();
-}
-
-lepus::Value ReadArgument(wasm_exec_env_t exec_env, RawArgReader* reader,
-                          WasmArgKind kind, const char* function_name,
-                          bool* ok) {
-  switch (kind) {
-    case WasmArgKind::kI32:
-      return lepus::Value(reader->ReadI32());
-    case WasmArgKind::kI64:
-      return lepus::Value(reader->ReadI64());
-    case WasmArgKind::kF64:
-      return lepus::Value(reader->ReadF64());
-    case WasmArgKind::kBool:
-      return lepus::Value(reader->ReadI32() != 0);
-    case WasmArgKind::kString: {
-      int32_t string_offset = reader->ReadI32();
-      int32_t string_length = reader->ReadI32();
-      return ReadUtf8String(exec_env, string_offset, string_length,
-                            function_name, ok);
-    }
-    case WasmArgKind::kExternRef:
-      return FromExternRef(exec_env, reader->ReadExternRef(), function_name, ok);
-    case WasmArgKind::kAny:
-      return ReadAnyValue(exec_env, reader, function_name, ok);
-  }
-
-  SetException(exec_env, ExceptionPrefix(function_name) +
-                             " unknown argument ABI kind");
-  *ok = false;
-  return lepus::Value();
+  return lepus::Value(element);
 }
 
 bool ValueAsI32(const lepus::Value& value, const char* function_name,
@@ -803,7 +683,7 @@ bool ValueAsI64(const lepus::Value& value, const char* function_name,
 
 bool ValueAsString(const lepus::Value& value, const char* function_name,
                    wasm_exec_env_t exec_env, std::string* out) {
-  if (value.IsEmpty()) {
+  if (value.IsEmpty() || value.IsUndefined() || value.IsNil()) {
     out->clear();
     return true;
   }
@@ -816,149 +696,100 @@ bool ValueAsString(const lepus::Value& value, const char* function_name,
   return false;
 }
 
-bool WriteAnyValueDescriptor(wasm_exec_env_t exec_env, int32_t out_offset,
-                             WasmHostValueOut* out_value,
-                             const char* function_name) {
-  if (!ValidateAppMemory(exec_env, out_offset,
-                         static_cast<int32_t>(sizeof(WasmHostValueOut)),
-                         function_name, "output value")) {
-    return false;
-  }
-  auto* value_out = AppAddrToNative(exec_env, out_offset);
-  std::memcpy(value_out, out_value, sizeof(WasmHostValueOut));
-  return true;
-}
+void WriteHostReturn(wasm_exec_env_t, uint64_t*, RawArgReader*, WasmVoid,
+                     lepus::Value&&, const char*, bool*) {}
 
-uintptr_t WriteAnyReturn(wasm_exec_env_t exec_env, RawArgReader* reader,
-                         lepus::Value&& result, const char* function_name,
-                         bool* ok) {
-  int32_t out_value_offset = reader->ReadI32();
-  int32_t out_string_offset = reader->ReadI32();
-  int32_t out_string_max_length = reader->ReadI32();
-
-  WasmHostValueOut value_out = {};
-  if (result.IsUndefined()) {
-    value_out.kind = static_cast<int32_t>(WasmHostValueKind::kUndefined);
-    *ok = WriteAnyValueDescriptor(exec_env, out_value_offset, &value_out,
-                                  function_name);
-    return kNullExternRef;
-  }
-  if (result.IsNil()) {
-    value_out.kind = static_cast<int32_t>(WasmHostValueKind::kNull);
-    *ok = WriteAnyValueDescriptor(exec_env, out_value_offset, &value_out,
-                                  function_name);
-    return kNullExternRef;
-  }
-  if (result.IsBool()) {
-    value_out.kind = static_cast<int32_t>(WasmHostValueKind::kBool);
-    value_out.bool_value = result.Bool() ? 1 : 0;
-    *ok = WriteAnyValueDescriptor(exec_env, out_value_offset, &value_out,
-                                  function_name);
-    return kNullExternRef;
-  }
-  if (result.IsNumber()) {
-    value_out.kind = static_cast<int32_t>(WasmHostValueKind::kNumber);
-    value_out.number_value = result.Number();
-    *ok = WriteAnyValueDescriptor(exec_env, out_value_offset, &value_out,
-                                  function_name);
-    return kNullExternRef;
-  }
-  if (result.IsString()) {
-    value_out.kind = static_cast<int32_t>(WasmHostValueKind::kString);
-    const std::string& string_value = result.StdString();
-    value_out.string_required_length = RequiredStringLength(string_value);
-    int32_t written_length =
-        WriteUtf8String(exec_env, string_value, out_string_offset,
-                        out_string_max_length, function_name, ok);
-    value_out.string_written_length = written_length >= 0 ? written_length : 0;
-    if (!WriteAnyValueDescriptor(exec_env, out_value_offset, &value_out,
-                                 function_name)) {
-      *ok = false;
-    }
-    return kNullExternRef;
-  }
-
-  value_out.kind = static_cast<int32_t>(WasmHostValueKind::kExternRef);
-  if (!WriteAnyValueDescriptor(exec_env, out_value_offset, &value_out,
-                               function_name)) {
+void WriteHostReturn(wasm_exec_env_t exec_env, uint64_t* raw_args,
+                     RawArgReader*, WasmI32, lepus::Value&& result,
+                     const char* function_name, bool* ok) {
+  int32_t value = 0;
+  if (!ValueAsI32(result, function_name, exec_env, &value)) {
     *ok = false;
-    return kInvalidExternRef;
-  }
-  return ToExternRef(exec_env, std::move(result), function_name);
-}
-
-void WriteReturnValue(wasm_exec_env_t exec_env, uint64_t* raw_args,
-                      RawArgReader* reader, WasmReturnKind kind,
-                      lepus::Value&& result, const char* function_name,
-                      bool* ok) {
-  switch (kind) {
-    case WasmReturnKind::kVoid:
-      return;
-    case WasmReturnKind::kI32: {
-      int32_t value = 0;
-      if (!ValueAsI32(result, function_name, exec_env, &value)) {
-        *ok = false;
-        return;
-      }
-      raw_args[0] = static_cast<uint32_t>(value);
-      return;
-    }
-    case WasmReturnKind::kI64: {
-      int64_t value = 0;
-      if (!ValueAsI64(result, function_name, exec_env, &value)) {
-        *ok = false;
-        return;
-      }
-      raw_args[0] = static_cast<uint64_t>(value);
-      return;
-    }
-    case WasmReturnKind::kBool:
-      raw_args[0] = result.Bool() ? 1 : 0;
-      return;
-    case WasmReturnKind::kString: {
-      int32_t out_offset = reader->ReadI32();
-      int32_t out_max_length = reader->ReadI32();
-      if (result.IsEmpty()) {
-        raw_args[0] = static_cast<uint32_t>(-1);
-        return;
-      }
-      std::string string_value;
-      if (!ValueAsString(result, function_name, exec_env, &string_value)) {
-        *ok = false;
-        raw_args[0] = static_cast<uint32_t>(-1);
-        return;
-      }
-      int32_t required_length =
-          WriteUtf8String(exec_env, string_value, out_offset, out_max_length,
-                          function_name, ok);
-      raw_args[0] = static_cast<uint32_t>(required_length);
-      return;
-    }
-    case WasmReturnKind::kExternRef:
-      raw_args[0] = ToExternRef(exec_env, std::move(result), function_name);
-      return;
-    case WasmReturnKind::kAny:
-      raw_args[0] = WriteAnyReturn(exec_env, reader, std::move(result),
-                                   function_name, ok);
-      return;
-  }
-
-  SetException(exec_env, ExceptionPrefix(function_name) +
-                             " unknown return ABI kind");
-  *ok = false;
-}
-
-void EngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
-  auto* descriptor = static_cast<const BindingDescriptor*>(
-      wasm_runtime_get_function_attachment(exec_env));
-  if (descriptor == nullptr) {
-    SetException(exec_env, "WAMR host function missing binding descriptor");
     return;
   }
+  raw_args[0] = static_cast<uint32_t>(value);
+}
 
+void WriteHostReturn(wasm_exec_env_t exec_env, uint64_t* raw_args,
+                     RawArgReader*, WasmI64, lepus::Value&& result,
+                     const char* function_name, bool* ok) {
+  int64_t value = 0;
+  if (!ValueAsI64(result, function_name, exec_env, &value)) {
+    *ok = false;
+    return;
+  }
+  raw_args[0] = static_cast<uint64_t>(value);
+}
+
+void WriteHostReturn(wasm_exec_env_t, uint64_t* raw_args, RawArgReader*,
+                     WasmBool, lepus::Value&& result, const char*, bool*) {
+  raw_args[0] = result.Bool() ? 1 : 0;
+}
+
+void WriteHostReturn(wasm_exec_env_t exec_env, uint64_t* raw_args,
+                     RawArgReader* reader, WasmString, lepus::Value&& result,
+                     const char* function_name, bool* ok) {
+  int32_t out_offset = reader->ReadI32();
+  int32_t out_max_length = reader->ReadI32();
+  if (result.IsEmpty() || result.IsUndefined() || result.IsNil()) {
+    raw_args[0] = static_cast<uint32_t>(-1);
+    return;
+  }
+  std::string string_value;
+  if (!ValueAsString(result, function_name, exec_env, &string_value)) {
+    *ok = false;
+    raw_args[0] = static_cast<uint32_t>(-1);
+    return;
+  }
+  int32_t required_length =
+      WriteUtf8String(exec_env, string_value, out_offset, out_max_length,
+                      function_name, ok);
+  raw_args[0] = static_cast<uint32_t>(required_length);
+}
+
+void WriteHostReturn(wasm_exec_env_t exec_env, uint64_t* raw_args,
+                     RawArgReader*, WasmElementRef, lepus::Value&& result,
+                     const char* function_name, bool*) {
+  raw_args[0] = static_cast<uint32_t>(
+      StoreElementValue(exec_env, std::move(result), function_name));
+}
+
+void InjectHiddenCreateValues(std::vector<lepus::Value>*, HiddenCreateNone) {}
+
+void InjectHiddenCreateValues(std::vector<lepus::Value>* args,
+                              HiddenCreateElement) {
+  args->insert(args->begin() + 1, lepus::Value(0.0));
+}
+
+void InjectHiddenCreateValues(std::vector<lepus::Value>* args,
+                              HiddenCreatePage) {
+  args->insert(args->begin(), lepus::Value(std::string("0")));
+  args->insert(args->begin() + 1, lepus::Value(0.0));
+}
+
+void InjectHiddenCreateValues(std::vector<lepus::Value>* args,
+                              HiddenCreateParent) {
+  args->insert(args->begin(), lepus::Value(0.0));
+}
+
+template <typename ArgTag>
+void ReadAndAppendHostArgument(wasm_exec_env_t exec_env, RawArgReader* reader,
+                               const char* function_name, bool* ok,
+                               std::vector<lepus::Value>* args) {
+  if (!*ok) {
+    return;
+  }
+  args->emplace_back(
+      ReadHostArgument(exec_env, reader, ArgTag{}, function_name, ok));
+}
+
+template <typename ReturnTag, typename HiddenCreateTag, typename... ArgTags>
+void InvokeEngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args,
+                              lepus::CFunction function,
+                              const char* function_name) {
   auto* context = GetEngineHostContext(exec_env);
   if (context == nullptr) {
-    SetException(exec_env, ExceptionPrefix(descriptor->name) +
+    SetException(exec_env, ExceptionPrefix(function_name) +
                                " missing Lynx runtime context");
     return;
   }
@@ -966,267 +797,770 @@ void EngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
   bool ok = true;
   RawArgReader reader(raw_args);
   std::vector<lepus::Value> args;
-  args.reserve(descriptor->argc + 2);
-  for (size_t i = 0; i < descriptor->argc; ++i) {
-    args.emplace_back(
-        ReadArgument(exec_env, &reader, descriptor->args[i], descriptor->name,
-                     &ok));
-    if (!ok) {
-      return;
-    }
+  args.reserve(sizeof...(ArgTags) + 2);
+  int unused[] = {0, (ReadAndAppendHostArgument<ArgTags>(
+                          exec_env, &reader, function_name, &ok, &args),
+                      0)...};
+  (void)unused;
+  if (!ok) {
+    return;
   }
 
-  switch (descriptor->hidden_create_args) {
-    case HiddenCreateArgs::kNone:
-      break;
-    case HiddenCreateArgs::kCreateElement:
-      args.insert(args.begin() + 1, lepus::Value(0.0));
-      break;
-    case HiddenCreateArgs::kCreatePage:
-      args.insert(args.begin(), lepus::Value(std::string("0")));
-      args.insert(args.begin() + 1, lepus::Value(0.0));
-      break;
-    case HiddenCreateArgs::kCreateParent:
-      args.insert(args.begin(), lepus::Value(0.0));
-      break;
-  }
+  InjectHiddenCreateValues(&args, HiddenCreateTag{});
 
-  lepus::Value result =
-      descriptor->function(context, args.data(), static_cast<int>(args.size()));
-  WriteReturnValue(exec_env, raw_args, &reader, descriptor->return_kind,
-                   std::move(result), descriptor->name, &ok);
+  lepus::Value result = function(context, args.data(),
+                                 static_cast<int>(args.size()));
+  WriteHostReturn(exec_env, raw_args, &reader, ReturnTag{}, std::move(result),
+                  function_name, &ok);
 }
 
-#define ARG_LIST(name, ...) \
-  constexpr WasmArgKind name[] = {__VA_ARGS__}
+#define BINDING(id, symbol, function, return_tag, ...)                     \
+  constexpr const char* id##Symbol = symbol;                               \
+  void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {    \
+    InvokeEngineHostFunction<return_tag, HiddenCreateNone, __VA_ARGS__>(   \
+        exec_env, raw_args, &tasm::RendererFunctions::function,            \
+        id##Symbol);                                                       \
+  }
 
-#define BINDING(id, symbol, function, return_kind, args)                    \
-  constexpr BindingDescriptor id = {symbol,                                \
-                                    &tasm::RendererFunctions::function,     \
-                                    args, std::size(args), return_kind,     \
-                                    HiddenCreateArgs::kNone}
+#define BINDING_WITH_CREATE_ARGS(id, symbol, function, return_tag,       \
+                                 hidden_create_tag, ...)                 \
+  constexpr const char* id##Symbol = symbol;                             \
+  void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {  \
+    InvokeEngineHostFunction<return_tag, hidden_create_tag, __VA_ARGS__>( \
+        exec_env, raw_args, &tasm::RendererFunctions::function,          \
+        id##Symbol);                                                     \
+  }
 
-#define BINDING_WITH_CREATE_ARGS(id, symbol, function, return_kind, args, \
-                                 hidden_create_args)                    \
-  constexpr BindingDescriptor id = {symbol,                               \
-                                    &tasm::RendererFunctions::function,    \
-                                    args, std::size(args), return_kind,    \
-                                    hidden_create_args}
+#define BINDING0(id, symbol, function, return_tag)                         \
+  constexpr const char* id##Symbol = symbol;                               \
+  void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {    \
+    InvokeEngineHostFunction<return_tag, HiddenCreateNone>(                \
+        exec_env, raw_args, &tasm::RendererFunctions::function,            \
+        id##Symbol);                                                       \
+  }
 
-#define BINDING0(id, symbol, function, return_kind)               \
-  constexpr BindingDescriptor id = {symbol,                       \
-                                    &tasm::RendererFunctions::function, \
-                                    nullptr, 0, return_kind,      \
-                                    HiddenCreateArgs::kNone}
+#define BINDING0_WITH_CREATE_ARGS(id, symbol, function, return_tag,       \
+                                  hidden_create_tag)                      \
+  constexpr const char* id##Symbol = symbol;                              \
+  void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {   \
+    InvokeEngineHostFunction<return_tag, hidden_create_tag>(              \
+        exec_env, raw_args, &tasm::RendererFunctions::function,           \
+        id##Symbol);                                                      \
+  }
 
-#define BINDING0_WITH_CREATE_ARGS(id, symbol, function, return_kind, \
-                                  hidden_create_args)              \
-  constexpr BindingDescriptor id = {symbol,                          \
-                                    &tasm::RendererFunctions::function, \
-                                    nullptr, 0, return_kind,         \
-                                    hidden_create_args}
-
-ARG_LIST(kCreateElementArgs, WasmArgKind::kString);
 BINDING_WITH_CREATE_ARGS(
     kCreateElementBinding, tasm::kCFunctionCreateElement, FiberCreateElement,
-    WasmReturnKind::kExternRef, kCreateElementArgs,
-    HiddenCreateArgs::kCreateElement);
+    WasmElementRef, HiddenCreateElement, WasmString);
 BINDING0_WITH_CREATE_ARGS(kCreatePageBinding, tasm::kCFunctionCreatePage,
-                          FiberCreatePage, WasmReturnKind::kExternRef,
-                          HiddenCreateArgs::kCreatePage);
+                          FiberCreatePage, WasmElementRef, HiddenCreatePage);
 BINDING0_WITH_CREATE_ARGS(kCreateViewBinding, tasm::kCFunctionCreateView,
-                          FiberCreateView, WasmReturnKind::kExternRef,
-                          HiddenCreateArgs::kCreateParent);
+                          FiberCreateView, WasmElementRef, HiddenCreateParent);
 BINDING0_WITH_CREATE_ARGS(
     kCreateScrollViewBinding, tasm::kCFunctionCreateScrollView,
-    FiberCreateScrollView, WasmReturnKind::kExternRef,
-    HiddenCreateArgs::kCreateParent);
+    FiberCreateScrollView, WasmElementRef, HiddenCreateParent);
 BINDING0_WITH_CREATE_ARGS(kCreateTextBinding, tasm::kCFunctionCreateText,
-                          FiberCreateText, WasmReturnKind::kExternRef,
-                          HiddenCreateArgs::kCreateParent);
+                          FiberCreateText, WasmElementRef, HiddenCreateParent);
 BINDING0_WITH_CREATE_ARGS(kCreateImageBinding, tasm::kCFunctionCreateImage,
-                          FiberCreateImage, WasmReturnKind::kExternRef,
-                          HiddenCreateArgs::kCreateParent);
-ARG_LIST(kCreateRawTextArgs, WasmArgKind::kString);
+                          FiberCreateImage, WasmElementRef, HiddenCreateParent);
 BINDING(kCreateRawTextBinding, tasm::kCFunctionCreateRawText,
-        FiberCreateRawText, WasmReturnKind::kExternRef, kCreateRawTextArgs);
+        FiberCreateRawText, WasmElementRef, WasmString);
 BINDING0_WITH_CREATE_ARGS(kCreateNonElementBinding,
                           tasm::kCFunctionCreateNonElement,
-                          FiberCreateNonElement, WasmReturnKind::kExternRef,
-                          HiddenCreateArgs::kCreateParent);
+                          FiberCreateNonElement, WasmElementRef,
+                          HiddenCreateParent);
 BINDING0_WITH_CREATE_ARGS(kCreateWrapperElementBinding,
                           tasm::kCFunctionCreateWrapperElement,
-                          FiberCreateWrapperElement, WasmReturnKind::kExternRef,
-                          HiddenCreateArgs::kCreateParent);
+                          FiberCreateWrapperElement, WasmElementRef,
+                          HiddenCreateParent);
 
-ARG_LIST(kTwoRefsArgs, WasmArgKind::kExternRef, WasmArgKind::kExternRef);
 BINDING(kAppendElementBinding, tasm::kCFunctionAppendElement,
-        FiberAppendElement, WasmReturnKind::kExternRef, kTwoRefsArgs);
+        FiberAppendElement, WasmElementRef, WasmElementRef, WasmElementRef);
 BINDING(kRemoveElementBinding, tasm::kCFunctionRemoveElement,
-        FiberRemoveElement, WasmReturnKind::kExternRef, kTwoRefsArgs);
-ARG_LIST(kInsertElementBeforeArgs, WasmArgKind::kExternRef,
-         WasmArgKind::kExternRef, WasmArgKind::kAny);
-BINDING(kInsertElementBeforeBinding, tasm::kCFunctionInsertElementBefore,
-        FiberInsertElementBefore, WasmReturnKind::kExternRef,
-        kInsertElementBeforeArgs);
-ARG_LIST(kOneRefArgs, WasmArgKind::kExternRef);
+        FiberRemoveElement, WasmElementRef, WasmElementRef, WasmElementRef);
 BINDING(kFirstElementBinding, tasm::kCFunctionFirstElement, FiberFirstElement,
-        WasmReturnKind::kExternRef, kOneRefArgs);
+        WasmElementRef, WasmElementRef);
 BINDING(kLastElementBinding, tasm::kCFunctionLastElement, FiberLastElement,
-        WasmReturnKind::kExternRef, kOneRefArgs);
+        WasmElementRef, WasmElementRef);
 BINDING(kNextElementBinding, tasm::kCFunctionNextElement, FiberNextElement,
-        WasmReturnKind::kExternRef, kOneRefArgs);
+        WasmElementRef, WasmElementRef);
 BINDING(kReplaceElementBinding, tasm::kCFunctionReplaceElement,
-        FiberReplaceElement, WasmReturnKind::kVoid, kTwoRefsArgs);
+        FiberReplaceElement, WasmVoid, WasmElementRef, WasmElementRef);
 BINDING(kSwapElementBinding, tasm::kCFunctionSwapElement, FiberSwapElement,
-        WasmReturnKind::kVoid, kTwoRefsArgs);
+        WasmVoid, WasmElementRef, WasmElementRef);
 BINDING(kGetParentBinding, tasm::kCFunctionGetParent, FiberGetParent,
-        WasmReturnKind::kExternRef, kOneRefArgs);
-BINDING(kGetChildrenBinding, tasm::kCFunctionGetChildren, FiberGetChildren,
-        WasmReturnKind::kExternRef, kOneRefArgs);
+        WasmElementRef, WasmElementRef);
 BINDING(kElementIsEqualBinding, tasm::kCFunctionElementIsEqual,
-        FiberElementIsEqual, WasmReturnKind::kBool, kTwoRefsArgs);
+        FiberElementIsEqual, WasmBool, WasmElementRef, WasmElementRef);
 BINDING(kGetElementUniqueIDBinding, tasm::kCFunctionGetElementUniqueID,
-        FiberGetElementUniqueID, WasmReturnKind::kI64, kOneRefArgs);
+        FiberGetElementUniqueID, WasmI64, WasmElementRef);
 BINDING(kGetTagBinding, tasm::kCFunctionGetTag, FiberGetTag,
-        WasmReturnKind::kString, kOneRefArgs);
-
-ARG_LIST(kSetAttributeArgs, WasmArgKind::kExternRef, WasmArgKind::kAny,
-         WasmArgKind::kAny);
-BINDING(kSetAttributeBinding, tasm::kCFunctionSetAttribute,
-        FiberSetAttribute, WasmReturnKind::kVoid, kSetAttributeArgs);
-BINDING(kGetAttributesBinding, tasm::kCFunctionGetAttributes,
-        FiberGetAttributes, WasmReturnKind::kExternRef, kOneRefArgs);
-ARG_LIST(kRefStringArgs, WasmArgKind::kExternRef, WasmArgKind::kString);
-ARG_LIST(kRefAnyArgs, WasmArgKind::kExternRef, WasmArgKind::kAny);
+        WasmString, WasmElementRef);
 BINDING(kAddClassBinding, tasm::kCFunctionAddClass, FiberAddClass,
-        WasmReturnKind::kVoid, kRefStringArgs);
+        WasmVoid, WasmElementRef, WasmString);
 BINDING(kSetClassesBinding, tasm::kCFunctionSetClasses, FiberSetClasses,
-        WasmReturnKind::kVoid, kRefStringArgs);
-BINDING(kGetClassesBinding, tasm::kCFunctionGetClasses, FiberGetClasses,
-        WasmReturnKind::kExternRef, kOneRefArgs);
-ARG_LIST(kAddInlineStyleArgs, WasmArgKind::kExternRef, WasmArgKind::kAny,
-         WasmArgKind::kAny);
-BINDING(kAddInlineStyleBinding, tasm::kCFunctionAddInlineStyle,
-        FiberAddInlineStyle, WasmReturnKind::kVoid, kAddInlineStyleArgs);
-BINDING(kSetInlineStylesBinding, tasm::kCFunctionSetInlineStyles,
-        FiberSetInlineStyles, WasmReturnKind::kVoid, kRefAnyArgs);
-BINDING(kGetInlineStylesBinding, tasm::kCFunctionGetInlineStyles,
-        FiberGetInlineStyles, WasmReturnKind::kString, kOneRefArgs);
-ARG_LIST(kSetParsedStylesArgs, WasmArgKind::kExternRef, WasmArgKind::kString,
-         WasmArgKind::kAny);
-BINDING(kSetParsedStylesBinding, tasm::kCFunctionSetParsedStyles,
-        FiberSetParsedStyles, WasmReturnKind::kVoid, kSetParsedStylesArgs);
-BINDING(kGetComputedStylesBinding, tasm::kCFunctionGetComputedStyles,
-        FiberGetComputedStyles, WasmReturnKind::kAny, kOneRefArgs);
-ARG_LIST(kAddEventArgs, WasmArgKind::kExternRef, WasmArgKind::kString,
-         WasmArgKind::kString, WasmArgKind::kAny);
-BINDING(kAddEventBinding, tasm::kCFunctionAddEvent, FiberAddEvent,
-        WasmReturnKind::kVoid, kAddEventArgs);
-ARG_LIST(kRefRefArgs, WasmArgKind::kExternRef, WasmArgKind::kExternRef);
-BINDING(kSetEventsBinding, tasm::kCFunctionSetEvents, FiberSetEvents,
-        WasmReturnKind::kVoid, kRefAnyArgs);
-ARG_LIST(kGetEventArgs, WasmArgKind::kExternRef, WasmArgKind::kString,
-         WasmArgKind::kString);
-BINDING(kGetEventBinding, tasm::kCFunctionGetEvent, FiberGetEvent,
-        WasmReturnKind::kExternRef, kGetEventArgs);
-BINDING(kGetEventsBinding, tasm::kCFunctionGetEvents, FiberGetEvents,
-        WasmReturnKind::kExternRef, kOneRefArgs);
-BINDING(kSetIDBinding, tasm::kCFunctionSetID, FiberSetID,
-        WasmReturnKind::kVoid, kRefAnyArgs);
-BINDING(kGetIDBinding, tasm::kCFunctionGetID, FiberGetID,
-        WasmReturnKind::kString, kOneRefArgs);
-ARG_LIST(kAddDatasetArgs, WasmArgKind::kExternRef, WasmArgKind::kString,
-         WasmArgKind::kAny);
-BINDING(kAddDatasetBinding, tasm::kCFunctionAddDataset, FiberAddDataset,
-        WasmReturnKind::kVoid, kAddDatasetArgs);
-BINDING(kSetDatasetBinding, tasm::kCFunctionSetDataset, FiberSetDataset,
-        WasmReturnKind::kVoid, kRefAnyArgs);
-BINDING(kGetDatasetBinding, tasm::kCFunctionGetDataset, FiberGetDataset,
-        WasmReturnKind::kExternRef, kOneRefArgs);
-ARG_LIST(kTwoAnyArgs, WasmArgKind::kAny, WasmArgKind::kAny);
-BINDING0(kFlushElementTreeBinding, tasm::kCFunctionFlushElementTree,
-         FiberFlushElementTree, WasmReturnKind::kVoid);
-ARG_LIST(kReportErrorArgs, WasmArgKind::kAny, WasmArgKind::kAny);
-BINDING(kReportErrorBinding, tasm::kCFunctionReportError, ReportError,
-        WasmReturnKind::kVoid, kReportErrorArgs);
-BINDING(kGetDataByKeyBinding, tasm::kCFunctionGetDataByKey,
-        FiberGetDataByKey, WasmReturnKind::kAny, kRefStringArgs);
-ARG_LIST(kReplaceElementsArgs, WasmArgKind::kExternRef, WasmArgKind::kAny,
-         WasmArgKind::kAny);
-BINDING(kReplaceElementsBinding, tasm::kCFunctionReplaceElements,
-        FiberReplaceElements, WasmReturnKind::kVoid, kReplaceElementsArgs);
-ARG_LIST(kQuerySelectorArgs, WasmArgKind::kExternRef, WasmArgKind::kString,
-         WasmArgKind::kAny);
-BINDING(kQuerySelectorBinding, tasm::kCFunctionQuerySelector,
-        FiberQuerySelector, WasmReturnKind::kExternRef, kQuerySelectorArgs);
-BINDING(kQuerySelectorAllBinding, tasm::kCFunctionQuerySelectorAll,
-        FiberQuerySelectorAll, WasmReturnKind::kExternRef, kQuerySelectorArgs);
-BINDING(kAddConfigBinding, tasm::kCFunctionAddConfig, FiberAddConfig,
-        WasmReturnKind::kVoid, kAddDatasetArgs);
-BINDING(kSetConfigBinding, tasm::kCFunctionSetConfig, FiberSetConfig,
-        WasmReturnKind::kVoid, kRefAnyArgs);
-BINDING(kGetConfigBinding, tasm::kCFunctionGetConfig, FiberGetElementConfig,
-        WasmReturnKind::kExternRef, kOneRefArgs);
-ARG_LIST(kRefI32Args, WasmArgKind::kExternRef, WasmArgKind::kI32);
-BINDING(kGetInlineStyleBinding, tasm::kCFunctionGetInlineStyle,
-        FiberGetInlineStyle, WasmReturnKind::kAny, kRefI32Args);
-BINDING(kGetAttributeByNameBinding, tasm::kCFunctionGetAttributeByName,
-        FiberGetAttributeByName, WasmReturnKind::kAny, kRefStringArgs);
-BINDING(kGetAttributeNamesBinding, tasm::kCFunctionGetAttributeNames,
-        FiberGetAttributeNames, WasmReturnKind::kExternRef, kOneRefArgs);
+        WasmVoid, WasmElementRef, WasmString);
+BINDING(kGetIDBinding, tasm::kCFunctionGetID, FiberGetID, WasmString,
+        WasmElementRef);
 BINDING0(kGetPageElementBinding, tasm::kCFunctionGetPageElement,
-         FiberGetPageElement, WasmReturnKind::kExternRef);
-ARG_LIST(kUniqueIDArgs, WasmArgKind::kI64);
+         FiberGetPageElement, WasmElementRef);
 BINDING(kGetElementByUniqueIDBinding, tasm::kCFunctionGetElementByUniqueID,
-        FiberGetElementByUniqueID, WasmReturnKind::kExternRef, kUniqueIDArgs);
-ARG_LIST(kAddEventListenerArgs, WasmArgKind::kExternRef, WasmArgKind::kString,
-         WasmArgKind::kExternRef, WasmArgKind::kExternRef);
-BINDING(kAddEventListenerBinding, tasm::kCFunctionAddEventListener,
-        FiberAddEventListener, WasmReturnKind::kVoid, kAddEventListenerArgs);
-BINDING(kRemoveEventListenerBinding, tasm::kCFunctionFiberRemoveEventListener,
-        FiberRemoveEventListener, WasmReturnKind::kVoid, kAddEventListenerArgs);
-ARG_LIST(kCreateEventArgs, WasmArgKind::kI32, WasmArgKind::kString,
-         WasmArgKind::kExternRef, WasmArgKind::kExternRef);
-BINDING(kCreateEventBinding, tasm::kCFunctionCreateEvent, FiberCreateEvent,
-        WasmReturnKind::kExternRef, kCreateEventArgs);
-BINDING(kDispatchEventBinding, tasm::kCFunctionDispatchEvent,
-        FiberDispatchEvent, WasmReturnKind::kBool, kTwoRefsArgs);
-BINDING(kStopPropagationBinding, tasm::kCFunctionStopPropagation,
-        FiberStopPropagation, WasmReturnKind::kVoid, kOneRefArgs);
-BINDING(kStopImmediatePropagationBinding,
-        tasm::kCFunctionStopImmediatePropagation, FiberStopImmediatePropagation,
-        WasmReturnKind::kVoid, kOneRefArgs);
-ARG_LIST(kInvokeUIMethodArgs, WasmArgKind::kExternRef, WasmArgKind::kString,
-         WasmArgKind::kExternRef, WasmArgKind::kExternRef);
-BINDING(kInvokeUIMethodBinding, tasm::kCFunctionInvokeUIMethod,
-        InvokeUIMethod, WasmReturnKind::kVoid, kInvokeUIMethodArgs);
-BINDING(kGetComputedStyleByKeyBinding,
-        tasm::kCFunctionGetComputedStyleByKey, FiberGetComputedStyleByKey,
-        WasmReturnKind::kAny, kRefStringArgs);
+        FiberGetElementByUniqueID, WasmElementRef, WasmI64);
 
 #undef BINDING0_WITH_CREATE_ARGS
 #undef BINDING0
 #undef BINDING_WITH_CREATE_ARGS
 #undef BINDING
-#undef ARG_LIST
+
+constexpr const char kDropElementBindingSymbol[] = "binding__DropElement";
+constexpr const char kDropEventBindingSymbol[] = "binding__DropEvent";
+constexpr const char kSetStringAttributeSymbol[] = "__SetStringAttribute";
+constexpr const char kRemoveAttributeSymbol[] = "__RemoveAttribute";
+constexpr const char kGetStringAttributeByNameSymbol[] =
+    "__GetStringAttributeByName";
+
+void DropElementHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  DropElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                 kDropElementBindingSymbol);
+}
+
+void DropEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  DropEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
+               kDropEventBindingSymbol);
+}
+
+std::vector<int32_t> ReadI32Array(wasm_exec_env_t exec_env, int32_t data_offset,
+                                  int32_t count,
+                                  const char* function_name, bool* ok) {
+  int32_t byte_length = 0;
+  if (!CheckedByteLength(count, static_cast<int32_t>(sizeof(int32_t)),
+                         &byte_length)) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " array length is invalid");
+    *ok = false;
+    return {};
+  }
+  if (!ValidateAppMemory(exec_env, data_offset, byte_length, function_name,
+                         " input array")) {
+    *ok = false;
+    return {};
+  }
+  std::vector<int32_t> values;
+  values.reserve(static_cast<size_t>(count));
+  if (count == 0) {
+    return values;
+  }
+  auto* raw = static_cast<const int32_t*>(AppAddrToNative(exec_env,
+                                                          data_offset));
+  for (int32_t i = 0; i < count; ++i) {
+    values.emplace_back(raw[i]);
+  }
+  return values;
+}
+
+base::Vector<ElementRef> ReadElementArray(wasm_exec_env_t exec_env,
+                                          int32_t data_offset, int32_t count,
+                                          const char* function_name,
+                                          bool* ok) {
+  auto ids = ReadI32Array(exec_env, data_offset, count, function_name, ok);
+  base::Vector<ElementRef> elements;
+  if (!*ok) {
+    return elements;
+  }
+  elements.reserve(ids.size());
+  for (int32_t id : ids) {
+    auto element = GetElementRef(exec_env, id, function_name, ok);
+    if (!*ok) {
+      elements.clear();
+      return elements;
+    }
+    elements.emplace_back(std::move(element));
+  }
+  return elements;
+}
+
+int32_t WriteI32Array(wasm_exec_env_t exec_env,
+                      const std::vector<int32_t>& values, int32_t out_offset,
+                      int32_t out_capacity, const char* function_name,
+                      bool* ok) {
+  const int32_t required_count =
+      values.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())
+          ? std::numeric_limits<int32_t>::max()
+          : static_cast<int32_t>(values.size());
+  if (out_capacity < 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " output array capacity must not be negative");
+    *ok = false;
+    return required_count;
+  }
+  if (required_count > out_capacity || required_count == 0) {
+    return required_count;
+  }
+  int32_t byte_length = 0;
+  if (!CheckedByteLength(required_count, static_cast<int32_t>(sizeof(int32_t)),
+                         &byte_length) ||
+      !ValidateAppMemory(exec_env, out_offset, byte_length, function_name,
+                         " output array")) {
+    *ok = false;
+    return required_count;
+  }
+  auto* out = static_cast<int32_t*>(AppAddrToNative(exec_env, out_offset));
+  std::memcpy(out, values.data(), static_cast<size_t>(byte_length));
+  return required_count;
+}
+
+int32_t WriteElementArray(wasm_exec_env_t exec_env,
+                          const std::vector<ElementRef>& elements,
+                          int32_t out_offset, int32_t out_capacity,
+                          const char* function_name) {
+  bool ok = true;
+  if (out_capacity >= 0 &&
+      elements.size() <= static_cast<size_t>(out_capacity)) {
+    auto state = GetWasmModuleState(exec_env, function_name);
+    if (!state) {
+      return 0;
+    }
+    std::vector<int32_t> ids;
+    ids.reserve(elements.size());
+    for (const auto& element : elements) {
+      ids.emplace_back(
+          StoreElementRef(state, element, exec_env, function_name));
+    }
+    return WriteI32Array(exec_env, ids, out_offset, out_capacity,
+                         function_name, &ok);
+  }
+  return elements.size() >
+                 static_cast<size_t>(std::numeric_limits<int32_t>::max())
+             ? std::numeric_limits<int32_t>::max()
+             : static_cast<int32_t>(elements.size());
+}
+
+void WriteRequiredBytes(wasm_exec_env_t exec_env, int32_t required_bytes_offset,
+                        int32_t required_bytes, const char* function_name,
+                        bool* ok) {
+  if (!ValidateAppMemory(exec_env, required_bytes_offset,
+                         static_cast<int32_t>(sizeof(int32_t)), function_name,
+                         " required byte count")) {
+    *ok = false;
+    return;
+  }
+  auto* out =
+      static_cast<int32_t*>(AppAddrToNative(exec_env, required_bytes_offset));
+  *out = required_bytes;
+}
+
+int32_t WriteStringArray(wasm_exec_env_t exec_env,
+                         const std::vector<std::string>& values,
+                         int32_t items_offset, int32_t item_capacity,
+                         int32_t bytes_offset, int32_t byte_capacity,
+                         int32_t required_bytes_offset,
+                         const char* function_name) {
+  bool ok = true;
+  int32_t required_bytes = 0;
+  for (const auto& value : values) {
+    if (value.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max() -
+                                           required_bytes)) {
+      required_bytes = std::numeric_limits<int32_t>::max();
+      break;
+    }
+    required_bytes += static_cast<int32_t>(value.size());
+  }
+  WriteRequiredBytes(exec_env, required_bytes_offset, required_bytes,
+                     function_name, &ok);
+  if (!ok) {
+    return 0;
+  }
+
+  const int32_t required_items =
+      values.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())
+          ? std::numeric_limits<int32_t>::max()
+          : static_cast<int32_t>(values.size());
+  if (item_capacity < 0 || byte_capacity < 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " output capacity must not be negative");
+    return required_items;
+  }
+  if (required_items > item_capacity || required_bytes > byte_capacity ||
+      required_items == 0) {
+    return required_items;
+  }
+
+  int32_t item_bytes = 0;
+  if (!CheckedByteLength(required_items, 2 * static_cast<int32_t>(sizeof(int32_t)),
+                         &item_bytes) ||
+      !ValidateAppMemory(exec_env, items_offset, item_bytes, function_name,
+                         " output string item array") ||
+      !ValidateAppMemory(exec_env, bytes_offset, required_bytes, function_name,
+                         " output string bytes")) {
+    return required_items;
+  }
+
+  auto* items = static_cast<int32_t*>(AppAddrToNative(exec_env, items_offset));
+  auto* bytes = static_cast<char*>(AppAddrToNative(exec_env, bytes_offset));
+  int32_t cursor = 0;
+  for (int32_t i = 0; i < required_items; ++i) {
+    items[2 * i] = cursor;
+    items[2 * i + 1] = static_cast<int32_t>(values[static_cast<size_t>(i)].size());
+    if (!values[static_cast<size_t>(i)].empty()) {
+      std::memcpy(bytes + cursor, values[static_cast<size_t>(i)].data(),
+                  values[static_cast<size_t>(i)].size());
+      cursor += static_cast<int32_t>(values[static_cast<size_t>(i)].size());
+    }
+  }
+  return required_items;
+}
+
+void InsertElementBeforeHostFunction(wasm_exec_env_t exec_env,
+                                     uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionInsertElementBefore;
+  bool ok = true;
+  auto parent = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                              kFunction, &ok);
+  auto child = GetElementRef(exec_env, static_cast<int32_t>(raw_args[1]),
+                             kFunction, &ok);
+  auto before = GetOptionalElementRef(exec_env, static_cast<int32_t>(raw_args[2]),
+                                      kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+  if (before) {
+    parent->InsertNodeBefore(child, before);
+  } else {
+    parent->InsertNode(child);
+  }
+  raw_args[0] = raw_args[1];
+}
+
+void GetChildrenHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionGetChildren;
+  bool ok = true;
+  auto parent = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                              kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = 0;
+    return;
+  }
+  std::vector<ElementRef> children;
+  children.reserve(parent->children().size());
+  for (const auto& child : parent->children()) {
+    children.emplace_back(fml::static_ref_ptr_cast<tasm::FiberElement>(child));
+  }
+  raw_args[0] = static_cast<uint32_t>(WriteElementArray(
+      exec_env, children, static_cast<int32_t>(raw_args[1]),
+      static_cast<int32_t>(raw_args[2]), kFunction));
+}
+
+void SetStringAttributeHostFunction(wasm_exec_env_t exec_env,
+                                    uint64_t* raw_args) {
+  constexpr const char* kFunction = kSetStringAttributeSymbol;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string key = ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                                   static_cast<int32_t>(raw_args[2]), kFunction,
+                                   &ok);
+  std::string value =
+      ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[3]),
+                     static_cast<int32_t>(raw_args[4]), kFunction, &ok);
+  if (!ok) {
+    return;
+  }
+  if (key.empty()) {
+    SetException(exec_env, ExceptionPrefix(kFunction) +
+                               " attribute key must not be empty");
+    return;
+  }
+  element->SetAttribute(base::String(key), lepus::Value(value));
+}
+
+void RemoveAttributeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction = kRemoveAttributeSymbol;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string key = ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                                   static_cast<int32_t>(raw_args[2]), kFunction,
+                                   &ok);
+  if (!ok) {
+    return;
+  }
+  if (key.empty()) {
+    SetException(exec_env, ExceptionPrefix(kFunction) +
+                               " attribute key must not be empty");
+    return;
+  }
+  element->SetAttribute(base::String(key), lepus::Value());
+}
+
+void SetIDHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionSetID;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  int32_t value_offset = static_cast<int32_t>(raw_args[1]);
+  int32_t value_length = static_cast<int32_t>(raw_args[2]);
+  if (!ok) {
+    return;
+  }
+  if (value_offset < 0 || value_length < 0) {
+    element->SetIdSelector(base::String());
+    return;
+  }
+  std::string value =
+      ReadUtf8String(exec_env, value_offset, value_length, kFunction, &ok);
+  if (!ok) {
+    return;
+  }
+  element->SetIdSelector(base::String(value));
+}
+
+void FlushElementTreeHostFunction(wasm_exec_env_t exec_env,
+                                  uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionFlushElementTree;
+  auto* context = GetEngineHostContext(exec_env);
+  if (context == nullptr) {
+    SetException(exec_env, ExceptionPrefix(kFunction) +
+                               " missing Lynx runtime context");
+    return;
+  }
+  bool ok = true;
+  int32_t root_id = static_cast<int32_t>(raw_args[0]);
+  std::vector<lepus::Value> args;
+  if (root_id >= 0) {
+    auto root = GetElementRef(exec_env, root_id, kFunction, &ok);
+    if (!ok) {
+      return;
+    }
+    args.emplace_back(root);
+  }
+  tasm::RendererFunctions::FiberFlushElementTree(
+      context, args.empty() ? nullptr : args.data(),
+      static_cast<int>(args.size()));
+}
+
+void ReplaceElementsHostFunction(wasm_exec_env_t exec_env,
+                                 uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionReplaceElements;
+  bool ok = true;
+  auto parent = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                              kFunction, &ok);
+  auto inserted =
+      ReadElementArray(exec_env, static_cast<int32_t>(raw_args[1]),
+                       static_cast<int32_t>(raw_args[2]), kFunction, &ok);
+  auto removed =
+      ReadElementArray(exec_env, static_cast<int32_t>(raw_args[3]),
+                       static_cast<int32_t>(raw_args[4]), kFunction, &ok);
+  auto ref = GetOptionalElementRef(exec_env, static_cast<int32_t>(raw_args[5]),
+                                   kFunction, &ok);
+  if (!ok) {
+    return;
+  }
+  if (parent->is_block()) {
+    static_cast<tasm::BlockElement*>(parent.get())
+        ->ReplaceElements(inserted, removed);
+    return;
+  }
+  parent->ReplaceElements(inserted, removed, ref.get());
+}
+
+tasm::NodeSelectOptions MakeCssSelectorOptions(std::string selector,
+                                               int32_t only_current_component) {
+  tasm::NodeSelectOptions options(
+      tasm::NodeSelectOptions::IdentifierType::CSS_SELECTOR, selector);
+  options.only_current_component = only_current_component != 0;
+  return options;
+}
+
+void QuerySelectorHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionQuerySelector;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string selector =
+      ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                     static_cast<int32_t>(raw_args[2]), kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+  auto options = MakeCssSelectorOptions(std::move(selector),
+                                        static_cast<int32_t>(raw_args[3]));
+  auto result = tasm::FiberElementSelector::Select(element.get(), options);
+  if (!result.Success()) {
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+  raw_args[0] = static_cast<uint32_t>(
+      StoreElementRef(exec_env, ElementRef(result.GetOneNode()), kFunction));
+}
+
+void QuerySelectorAllHostFunction(wasm_exec_env_t exec_env,
+                                  uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionQuerySelectorAll;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string selector =
+      ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                     static_cast<int32_t>(raw_args[2]), kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = 0;
+    return;
+  }
+  auto options = MakeCssSelectorOptions(std::move(selector),
+                                        static_cast<int32_t>(raw_args[5]));
+  options.first_only = false;
+  auto result = tasm::FiberElementSelector::Select(element.get(), options);
+  std::vector<ElementRef> elements;
+  elements.reserve(result.nodes.size());
+  for (auto* node : result.nodes) {
+    elements.emplace_back(ElementRef(node));
+  }
+  raw_args[0] = static_cast<uint32_t>(WriteElementArray(
+      exec_env, elements, static_cast<int32_t>(raw_args[3]),
+      static_cast<int32_t>(raw_args[4]), kFunction));
+}
+
+void GetClassesHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionGetClasses;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = 0;
+    return;
+  }
+  std::vector<std::string> values;
+  for (const auto& clazz : element->classes()) {
+    values.emplace_back(clazz.str());
+  }
+  raw_args[0] = static_cast<uint32_t>(WriteStringArray(
+      exec_env, values, static_cast<int32_t>(raw_args[1]),
+      static_cast<int32_t>(raw_args[2]), static_cast<int32_t>(raw_args[3]),
+      static_cast<int32_t>(raw_args[4]), static_cast<int32_t>(raw_args[5]),
+      kFunction));
+}
+
+void GetAttributeNamesHostFunction(wasm_exec_env_t exec_env,
+                                   uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionGetAttributeNames;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = 0;
+    return;
+  }
+  std::vector<std::string> values;
+  for (const auto& pair : element->data_model()->attributes()) {
+    values.emplace_back(pair.first.str());
+  }
+  const auto& builtin_attr_map = element->builtin_attr_map();
+  if (builtin_attr_map.has_value()) {
+    for (const auto& pair : *builtin_attr_map) {
+      values.emplace_back(std::to_string(pair.first));
+    }
+  }
+  raw_args[0] = static_cast<uint32_t>(WriteStringArray(
+      exec_env, values, static_cast<int32_t>(raw_args[1]),
+      static_cast<int32_t>(raw_args[2]), static_cast<int32_t>(raw_args[3]),
+      static_cast<int32_t>(raw_args[4]), static_cast<int32_t>(raw_args[5]),
+      kFunction));
+}
+
+void GetStringAttributeByNameHostFunction(wasm_exec_env_t exec_env,
+                                          uint64_t* raw_args) {
+  constexpr const char* kFunction = kGetStringAttributeByNameSymbol;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string key = ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                                   static_cast<int32_t>(raw_args[2]), kFunction,
+                                   &ok);
+  if (!ok) {
+    raw_args[0] = static_cast<uint32_t>(-1);
+    return;
+  }
+  const auto& attr_map = element->data_model()->attributes();
+  auto iter = attr_map.find(base::String(key));
+  if (iter == attr_map.end() || !iter->second.IsString()) {
+    raw_args[0] = static_cast<uint32_t>(-1);
+    return;
+  }
+  raw_args[0] = static_cast<uint32_t>(
+      WriteUtf8String(exec_env, iter->second.StdString(),
+                      static_cast<int32_t>(raw_args[3]),
+                      static_cast<int32_t>(raw_args[4]), kFunction, &ok));
+}
+
+event::EventListener::Options DecodeListenerOptions(int32_t flags) {
+  return event::EventListener::Options(
+      (flags & event::EventListener::Options::kCaptureBit) != 0,
+      (flags & event::EventListener::Options::kOnceBit) != 0,
+      (flags & event::EventListener::Options::kPassiveBit) != 0,
+      (flags & event::EventListener::Options::kSignalBit) != 0,
+      (flags & event::EventListener::Options::kCatchBit) != 0,
+      (flags & event::EventListener::Options::kGlobalBit) != 0);
+}
+
+class WasmEventListener : public event::EventListener {
+ public:
+  WasmEventListener(std::shared_ptr<WasmModuleTimerState> state,
+                    uint32_t handler_id,
+                    const event::EventListener::Options& options)
+      : event::EventListener(
+            event::EventListener::Type::kClosureEventListener, options),
+        state_(std::move(state)),
+        handler_id_(handler_id) {}
+
+  void Invoke(EventRef event) override {
+    InvokeWasmEventCallback(state_, handler_id_, event,
+                            tasm::kCFunctionAddEventListener);
+  }
+
+  bool Matches(event::EventListener* listener) override {
+    if (listener->type() != type()) {
+      return false;
+    }
+    auto* other = static_cast<WasmEventListener*>(listener);
+    return handler_id_ == other->handler_id_ &&
+           options_.flags == other->GetOptions().flags;
+  }
+
+ private:
+  std::shared_ptr<WasmModuleTimerState> state_;
+  uint32_t handler_id_;
+};
+
+void AddEventListenerHostFunction(wasm_exec_env_t exec_env,
+                                  uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionAddEventListener;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string event_type =
+      ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                     static_cast<int32_t>(raw_args[2]), kFunction, &ok);
+  if (!ok) {
+    return;
+  }
+  auto state = GetWasmModuleState(exec_env, kFunction);
+  if (!state) {
+    return;
+  }
+  const uint32_t handler_id = static_cast<uint32_t>(raw_args[3]);
+  const auto options = DecodeListenerOptions(static_cast<int32_t>(raw_args[4]));
+  element->SetJSEventHandler(base::String(event_type), base::String(),
+                             base::String());
+  element->AddEventListener(
+      event_type,
+      std::make_shared<WasmEventListener>(std::move(state), handler_id,
+                                          options));
+}
+
+void RemoveEventListenerHostFunction(wasm_exec_env_t exec_env,
+                                     uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionFiberRemoveEventListener;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string event_type =
+      ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                     static_cast<int32_t>(raw_args[2]), kFunction, &ok);
+  if (!ok) {
+    return;
+  }
+  const uint32_t handler_id = static_cast<uint32_t>(raw_args[3]);
+  const auto options = DecodeListenerOptions(static_cast<int32_t>(raw_args[4]));
+  element->RemoveEvent(base::String(event_type), base::String());
+  element->RemoveEventListener(
+      event_type,
+      std::make_shared<WasmEventListener>(nullptr, handler_id, options));
+}
+
+void CreateEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionCreateEvent;
+  bool ok = true;
+  int32_t type = static_cast<int32_t>(raw_args[0]);
+  std::string name = ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                                    static_cast<int32_t>(raw_args[2]),
+                                    kFunction, &ok);
+  int32_t flags = static_cast<int32_t>(raw_args[3]);
+  if (!ok) {
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+  int64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+  lepus::Value detail(lepus::Dictionary::Create());
+  auto event = fml::MakeRefCounted<event::Event>(
+      name, timestamp, static_cast<event::Event::EventType>(type),
+      (flags & kEventFlagCapture) != 0 ? event::Event::Capture::kYes
+                                       : event::Event::Capture::kNo,
+      (flags & kEventFlagBubbles) != 0 ? event::Event::Bubbles::kYes
+                                       : event::Event::Bubbles::kNo,
+      (flags & kEventFlagCancelable) != 0
+          ? event::Event::Cancelable::kYes
+          : event::Event::Cancelable::kNo,
+      (flags & kEventFlagComposed) != 0 ? event::Event::ComposedMode::kScoped
+                                        : event::Event::ComposedMode::kComposed,
+      event::Event::PhaseType::kNone, detail);
+  raw_args[0] =
+      static_cast<uint32_t>(StoreEventRef(exec_env, event, kFunction));
+}
+
+void DispatchEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionDispatchEvent;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[1]),
+                           kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = 0;
+    return;
+  }
+  bool result =
+      event::EventDispatcher::DispatchEvent(*element.get(), event).cancel_type ==
+      event::EventCancelType::kNotCanceled;
+  raw_args[0] = result ? 1 : 0;
+}
+
+void StopPropagationHostFunction(wasm_exec_env_t exec_env,
+                                 uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionStopPropagation;
+  bool ok = true;
+  auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                           kFunction, &ok);
+  if (ok) {
+    event->set_is_stop_propagation(true);
+  }
+}
+
+void StopImmediatePropagationHostFunction(wasm_exec_env_t exec_env,
+                                          uint64_t* raw_args) {
+  constexpr const char* kFunction = tasm::kCFunctionStopImmediatePropagation;
+  bool ok = true;
+  auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                           kFunction, &ok);
+  if (ok) {
+    event->set_is_stop_immediate_propagation(true);
+  }
+}
 
 #define WASM_I32 "i"
 #define WASM_I64 "I"
 #define WASM_BOOL "i"
 #define WASM_STRING "ii"
-// Rust's wasm32-wasip1 target cannot declare externref imports without
-// wasm-bindgen today, so the guest carries WAMR externref table indices as i32.
 #define WASM_REF "i"
 #define WASM_FUNC_REF "i"
-#define WASM_ANY "iFiii"
 #define WASM_STRING_OUT "ii"
-#define WASM_ANY_OUT "iii"
 #define SIG(args, result) "(" args ")" result
 
-#define SYMBOL(binding, signature)                                      \
-  { binding.name, reinterpret_cast<void*>(EngineHostFunction), signature, \
-    const_cast<BindingDescriptor*>(&binding) }
+#define SYMBOL(binding, signature)                                         \
+  { binding##Symbol, reinterpret_cast<void*>(binding##HostFunction),        \
+    signature, nullptr }
 
 #define CUSTOM_SYMBOL(symbol, function, signature) \
   { symbol, reinterpret_cast<void*>(function), signature, nullptr }
@@ -1241,76 +1575,71 @@ NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kCreateRawTextBinding, SIG(WASM_STRING, WASM_REF)),
     SYMBOL(kCreateNonElementBinding, SIG("", WASM_REF)),
     SYMBOL(kCreateWrapperElementBinding, SIG("", WASM_REF)),
+    CUSTOM_SYMBOL(kDropElementBindingSymbol, DropElementHostFunction,
+                  SIG(WASM_REF, "")),
+    CUSTOM_SYMBOL(kDropEventBindingSymbol, DropEventHostFunction,
+                  SIG(WASM_REF, "")),
     SYMBOL(kAppendElementBinding, SIG(WASM_REF WASM_REF, WASM_REF)),
     SYMBOL(kRemoveElementBinding, SIG(WASM_REF WASM_REF, WASM_REF)),
-    SYMBOL(kInsertElementBeforeBinding,
-           SIG(WASM_REF WASM_REF WASM_ANY, WASM_REF)),
+    CUSTOM_SYMBOL(tasm::kCFunctionInsertElementBefore,
+                  InsertElementBeforeHostFunction,
+                  SIG(WASM_REF WASM_REF WASM_REF, WASM_REF)),
     SYMBOL(kFirstElementBinding, SIG(WASM_REF, WASM_REF)),
     SYMBOL(kLastElementBinding, SIG(WASM_REF, WASM_REF)),
     SYMBOL(kNextElementBinding, SIG(WASM_REF, WASM_REF)),
     SYMBOL(kReplaceElementBinding, SIG(WASM_REF WASM_REF, "")),
     SYMBOL(kSwapElementBinding, SIG(WASM_REF WASM_REF, "")),
     SYMBOL(kGetParentBinding, SIG(WASM_REF, WASM_REF)),
-    SYMBOL(kGetChildrenBinding, SIG(WASM_REF, WASM_REF)),
+    CUSTOM_SYMBOL(tasm::kCFunctionGetChildren, GetChildrenHostFunction,
+                  SIG(WASM_REF WASM_I32 WASM_I32, WASM_I32)),
     SYMBOL(kElementIsEqualBinding, SIG(WASM_REF WASM_REF, WASM_BOOL)),
     SYMBOL(kGetElementUniqueIDBinding, SIG(WASM_REF, WASM_I64)),
     SYMBOL(kGetTagBinding, SIG(WASM_REF WASM_STRING_OUT, WASM_I32)),
-    SYMBOL(kSetAttributeBinding, SIG(WASM_REF WASM_ANY WASM_ANY, "")),
-    SYMBOL(kGetAttributesBinding, SIG(WASM_REF, WASM_REF)),
+    CUSTOM_SYMBOL(kSetStringAttributeSymbol, SetStringAttributeHostFunction,
+                  SIG(WASM_REF WASM_STRING WASM_STRING, "")),
+    CUSTOM_SYMBOL(kRemoveAttributeSymbol, RemoveAttributeHostFunction,
+                  SIG(WASM_REF WASM_STRING, "")),
     SYMBOL(kAddClassBinding, SIG(WASM_REF WASM_STRING, "")),
     SYMBOL(kSetClassesBinding, SIG(WASM_REF WASM_STRING, "")),
-    SYMBOL(kGetClassesBinding, SIG(WASM_REF, WASM_REF)),
-    SYMBOL(kAddInlineStyleBinding, SIG(WASM_REF WASM_ANY WASM_ANY, "")),
-    SYMBOL(kSetInlineStylesBinding, SIG(WASM_REF WASM_ANY, "")),
-    SYMBOL(kGetInlineStylesBinding,
-           SIG(WASM_REF WASM_STRING_OUT, WASM_I32)),
-    SYMBOL(kSetParsedStylesBinding, SIG(WASM_REF WASM_STRING WASM_ANY, "")),
-    SYMBOL(kGetComputedStylesBinding,
-           SIG(WASM_REF WASM_ANY_OUT, WASM_REF)),
-    SYMBOL(kAddEventBinding,
-           SIG(WASM_REF WASM_STRING WASM_STRING WASM_ANY, "")),
-    SYMBOL(kSetEventsBinding, SIG(WASM_REF WASM_ANY, "")),
-    SYMBOL(kGetEventBinding, SIG(WASM_REF WASM_STRING WASM_STRING, WASM_REF)),
-    SYMBOL(kGetEventsBinding, SIG(WASM_REF, WASM_REF)),
-    SYMBOL(kSetIDBinding, SIG(WASM_REF WASM_ANY, "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionGetClasses, GetClassesHostFunction,
+                  SIG(WASM_REF WASM_I32 WASM_I32 WASM_I32 WASM_I32 WASM_I32,
+                      WASM_I32)),
+    CUSTOM_SYMBOL(tasm::kCFunctionSetID, SetIDHostFunction,
+                  SIG(WASM_REF WASM_STRING, "")),
     SYMBOL(kGetIDBinding, SIG(WASM_REF WASM_STRING_OUT, WASM_I32)),
-    SYMBOL(kAddDatasetBinding, SIG(WASM_REF WASM_STRING WASM_ANY, "")),
-    SYMBOL(kSetDatasetBinding, SIG(WASM_REF WASM_ANY, "")),
-    SYMBOL(kGetDatasetBinding, SIG(WASM_REF, WASM_REF)),
-    SYMBOL(kFlushElementTreeBinding, SIG("", "")),
-    SYMBOL(kReportErrorBinding, SIG(WASM_ANY WASM_ANY, "")),
-    SYMBOL(kGetDataByKeyBinding, SIG(WASM_REF WASM_STRING WASM_ANY_OUT,
-                                     WASM_REF)),
-    SYMBOL(kReplaceElementsBinding, SIG(WASM_REF WASM_ANY WASM_ANY, "")),
-    SYMBOL(kQuerySelectorBinding, SIG(WASM_REF WASM_STRING WASM_ANY, WASM_REF)),
-    SYMBOL(kQuerySelectorAllBinding,
-           SIG(WASM_REF WASM_STRING WASM_ANY, WASM_REF)),
-    SYMBOL(kAddConfigBinding, SIG(WASM_REF WASM_STRING WASM_ANY, "")),
-    SYMBOL(kSetConfigBinding, SIG(WASM_REF WASM_ANY, "")),
-    SYMBOL(kGetConfigBinding, SIG(WASM_REF, WASM_REF)),
-    SYMBOL(kGetInlineStyleBinding, SIG(WASM_REF WASM_I32 WASM_ANY_OUT,
-                                       WASM_REF)),
-    SYMBOL(kGetAttributeByNameBinding,
-           SIG(WASM_REF WASM_STRING WASM_ANY_OUT, WASM_REF)),
-    SYMBOL(kGetAttributeNamesBinding, SIG(WASM_REF, WASM_REF)),
+    CUSTOM_SYMBOL(tasm::kCFunctionFlushElementTree, FlushElementTreeHostFunction,
+                  SIG(WASM_REF, "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionReplaceElements, ReplaceElementsHostFunction,
+                  SIG(WASM_REF WASM_I32 WASM_I32 WASM_I32 WASM_I32 WASM_REF,
+                      "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionQuerySelector, QuerySelectorHostFunction,
+                  SIG(WASM_REF WASM_STRING WASM_I32, WASM_REF)),
+    CUSTOM_SYMBOL(tasm::kCFunctionQuerySelectorAll, QuerySelectorAllHostFunction,
+                  SIG(WASM_REF WASM_STRING WASM_I32 WASM_I32 WASM_I32,
+                      WASM_I32)),
+    CUSTOM_SYMBOL(kGetStringAttributeByNameSymbol,
+                  GetStringAttributeByNameHostFunction,
+                  SIG(WASM_REF WASM_STRING WASM_STRING_OUT, WASM_I32)),
+    CUSTOM_SYMBOL(tasm::kCFunctionGetAttributeNames,
+                  GetAttributeNamesHostFunction,
+                  SIG(WASM_REF WASM_I32 WASM_I32 WASM_I32 WASM_I32 WASM_I32,
+                      WASM_I32)),
     SYMBOL(kGetPageElementBinding, SIG("", WASM_REF)),
     SYMBOL(kGetElementByUniqueIDBinding, SIG(WASM_I64, WASM_REF)),
-    CUSTOM_SYMBOL(tasm::kCFunctionAddEventListener, AddEventListenerHostFunction,
-                  SIG(WASM_REF WASM_STRING WASM_FUNC_REF WASM_I32 WASM_BOOL,
-                      "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionAddEventListener,
+                  AddEventListenerHostFunction,
+                  SIG(WASM_REF WASM_STRING WASM_I32 WASM_I32, "")),
     CUSTOM_SYMBOL(tasm::kCFunctionFiberRemoveEventListener,
                   RemoveEventListenerHostFunction,
-                  SIG(WASM_REF WASM_STRING WASM_FUNC_REF WASM_I32 WASM_BOOL,
-                      "")),
-    SYMBOL(kCreateEventBinding,
-           SIG(WASM_I32 WASM_STRING WASM_REF WASM_REF, WASM_REF)),
-    SYMBOL(kDispatchEventBinding, SIG(WASM_REF WASM_REF, WASM_BOOL)),
-    SYMBOL(kStopPropagationBinding, SIG(WASM_REF, "")),
-    SYMBOL(kStopImmediatePropagationBinding, SIG(WASM_REF, "")),
-    SYMBOL(kInvokeUIMethodBinding,
-           SIG(WASM_REF WASM_STRING WASM_REF WASM_REF, "")),
-    SYMBOL(kGetComputedStyleByKeyBinding,
-           SIG(WASM_REF WASM_STRING WASM_ANY_OUT, WASM_REF)),
+                  SIG(WASM_REF WASM_STRING WASM_I32 WASM_I32, "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionCreateEvent, CreateEventHostFunction,
+                  SIG(WASM_I32 WASM_STRING WASM_I32, WASM_REF)),
+    CUSTOM_SYMBOL(tasm::kCFunctionDispatchEvent, DispatchEventHostFunction,
+                  SIG(WASM_REF WASM_REF, WASM_BOOL)),
+    CUSTOM_SYMBOL(tasm::kCFunctionStopPropagation, StopPropagationHostFunction,
+                  SIG(WASM_REF, "")),
+    CUSTOM_SYMBOL(tasm::kCFunctionStopImmediatePropagation,
+                  StopImmediatePropagationHostFunction, SIG(WASM_REF, "")),
     CUSTOM_SYMBOL(tasm::kSetTimeout, SetTimeoutHostFunction,
                   SIG(WASM_FUNC_REF WASM_I64, WASM_I64)),
     CUSTOM_SYMBOL(tasm::kClearTimeout, ClearTimeoutHostFunction,
@@ -1324,9 +1653,7 @@ NativeSymbol g_engine_host_symbols[] = {
 #undef CUSTOM_SYMBOL
 #undef SYMBOL
 #undef SIG
-#undef WASM_ANY_OUT
 #undef WASM_STRING_OUT
-#undef WASM_ANY
 #undef WASM_FUNC_REF
 #undef WASM_REF
 #undef WASM_STRING
