@@ -1008,7 +1008,7 @@ public class LynxTemplateRender
         lynxUIRenderer.useInvokeUIMethod(), mLongTaskMonitorEnabled == LynxBooleanOption.FALSE,
         mForceLayoutOnBackgroundThread, mLynxViewConfigProvider.isEnableUnifiedPipeline(),
         mEmbeddedMode, enableLogicExecutor, mLynxViewBuilder.isDebuggable(),
-        mLynxEngineRef == null ? 0 : mLynxEngineRef.getNativePtr(),
+        mIsWasmTemplate, mLynxEngineRef == null ? 0 : mLynxEngineRef.getNativePtr(),
         mMainThreadModuleFactory != null ? mMainThreadModuleFactory : null);
 
     lynxUIRenderer.attachNativeFacade(mNativeFacade);
@@ -1479,13 +1479,34 @@ public class LynxTemplateRender
   }
 
   private void updateJSRuntimeForTemplate(@Nullable LynxLoadMeta metaData) {
-    mIsWasmTemplate = metaData != null && !metaData.isBundleValid()
+    boolean isWasmTemplate = metaData != null && !metaData.isBundleValid()
         && WamrWasmBytecodeUtils.hasWamrWasmBytecodeMagic(
             metaData.binaryData, metaData.byteBuffer);
+    updateWasmTemplateState(isWasmTemplate);
+  }
+
+  private void updateWasmTemplateState(boolean isWasmTemplate) {
+    mIsWasmTemplate = isWasmTemplate;
+    if (mIsWasmTemplate) {
+      ensureWasmTemplateThreadStrategy();
+    }
     mEnableJSRuntime = mLynxViewConfigProvider.isEnableJSRuntime() && !mIsWasmTemplate;
     if (mIsWasmTemplate && mNativePtr != 0) {
       reload = true;
     }
+  }
+
+  private void ensureWasmTemplateThreadStrategy() {
+    if (mThreadStrategyForRendering == ThreadStrategyForRendering.MOST_ON_TASM) {
+      return;
+    }
+    // Native creation enforces this again; keep Java-side state aligned for UI
+    // renderer setup, public getters, and reporting.
+    LLog.i(TAG,
+        "WASM template forces thread strategy to MOST_ON_TASM, current: "
+            + mThreadStrategyForRendering);
+    mThreadStrategyForRendering = ThreadStrategyForRendering.MOST_ON_TASM;
+    onThreadStrategyUpdated();
   }
 
   private void prepareLynxEngineIfNeeded() {
@@ -2657,6 +2678,8 @@ public class LynxTemplateRender
             onFailed("Source is null!");
             return;
           }
+          updateWasmTemplateState(
+              WamrWasmBytecodeUtils.hasWamrWasmBytecodeMagic(template));
           if (mDevTool != null) {
             mDevTool.attachToDebugBridge(mUrl);
           }
@@ -2695,6 +2718,8 @@ public class LynxTemplateRender
         onFailed("ByteBuffer is null!");
         return;
       }
+      updateWasmTemplateState(
+          WamrWasmBytecodeUtils.hasWamrWasmBytecodeMagic(buffer));
 
       if (mDevTool != null) {
         mDevTool.attachToDebugBridge(mUrl);
@@ -3402,14 +3427,14 @@ public class LynxTemplateRender
 
     @Override
     public void onLynxEvent(ReadableMap event) {
-      if (mLogicExecutor != null) {
+      if (mLogicExecutor != null && !mIsWasmTemplate) {
         mLogicExecutor.onLynxEvent(getLynxView(), event);
       }
     }
   }
 
   public void onLynxEvent(ReadableMap event) {
-    if (mLogicExecutor != null) {
+    if (mLogicExecutor != null && !mIsWasmTemplate) {
       mLogicExecutor.onLynxEvent(getLynxView(), event);
     }
   }
@@ -3611,6 +3636,9 @@ public class LynxTemplateRender
   private void onThreadStrategyUpdated() {
     mAsyncRender = (mThreadStrategyForRendering == ThreadStrategyForRendering.MULTI_THREADS
         || mThreadStrategyForRendering == ThreadStrategyForRendering.MOST_ON_TASM);
+    mVsyncAlignedFlushEnabled = VSYNC_ALIGNED_FLUSH_EXP_SWITCH
+        && LynxEnv.inst().getVsyncAlignedFlushGlobalSwitch()
+        && isThreadStrategySupportVsyncAlignedFlush();
     if (mLynxContext != null) {
       if (mLynxContext.enableEventReporter()) {
         LynxEventReporter.updateGenericInfo(LynxEventReporter.PROP_NAME_THREAD_MODE,
@@ -4333,7 +4361,7 @@ public class LynxTemplateRender
       Object tasmPlatformInvoker, long whiteboard, long uiDelegate, boolean useInvokeUIMethod,
       boolean longTaskMonitorDisabled, boolean forceLayoutOnBackgroundThread,
       boolean enableUnifiedPipeline, int embeddedMode, boolean has_logic_executor,
-      boolean debuggable, long enginePtr, Object moduleFactory);
+      boolean debuggable, boolean isWasmTemplate, long enginePtr, Object moduleFactory);
 
   private static native void nativeRebuildLynxEngine(
       long ptr, long lifecycle, long uiDelegate, Object tasmPlatformInvoker, Object moduleFactory);

@@ -63,6 +63,12 @@ TEST_F(TaskRunnerManufactorTest, MostOnTASMMode) {
             most_on_tasm_mode_manufactor.GetTASMTaskRunner()->GetLoop());
 }
 
+TEST_F(TaskRunnerManufactorTest, DisableJSThread) {
+  TaskRunnerManufactor js_thread_disabled_manufactor =
+      TaskRunnerManufactor(MOST_ON_TASM, false, false, false, false, "", false);
+  ASSERT_EQ(js_thread_disabled_manufactor.GetJSTaskRunner().get(), nullptr);
+}
+
 TEST_F(TaskRunnerManufactorTest, DefaultMultiThreadMode) {
   TaskRunnerManufactor multi_thread_mode_manufactor =
       TaskRunnerManufactor(MULTI_THREADS, false, false);

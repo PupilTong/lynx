@@ -68,6 +68,7 @@ struct ShellOption {
   bool enable_js_{true};
   bool enable_multi_tasm_thread_{true};
   bool enable_multi_layout_thread_{true};
+  bool enable_js_thread_{true};
   bool enable_js_group_thread_{false};
   bool enable_vsync_aligned_msg_loop_{false};
   bool enable_async_hydration_{false};
