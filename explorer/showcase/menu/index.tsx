@@ -73,6 +73,11 @@ const ITEMS: ItemProps[] = [
     url: 'file://lynx?local://showcase/menu/list.lynx.bundle',
   },
   {
+    title: 'Rust Wasm',
+    description: 'Examples built with Yew and WAMR host bindings',
+    url: 'file://lynx?local://showcase/menu/rustwasm.lynx.bundle',
+  },
+  {
     title: 'ScrollView',
     description: 'Some examples show how to use scrollable container',
     url: 'file://lynx?local://showcase/menu/scrollview.lynx.bundle',

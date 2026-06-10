@@ -2653,7 +2653,7 @@ void TemplateAssembler::OnScreenMetricsSet(float width, float height,
       kHeight_str,
       lepus::Value(height * env_config.PhysicalPixelsPerLayoutUnit()));
   lepus::Value result;
-  if (EnableFiberArch()) {
+  if (EnableFiberArch() && !is_wasm_template_) {
     result =
         FindEntry(tasm::DEFAULT_ENTRY_NAME)
             ->GetVm()
@@ -3376,6 +3376,17 @@ TemplateData TemplateAssembler::ProcessTemplateData(
   tasm::TimingCollector::Instance()->MarkFrameworkTiming(
       tasm::timing::kDataProcessorStart);
   TemplateData data;
+
+  if (is_wasm_template_) {
+    if (template_data != nullptr) {
+      data = TemplateData(template_data->value(), template_data->IsReadOnly(),
+                          template_data->PreprocessorName());
+      data.SetPlatformData(template_data->ObtainPlatformData());
+    }
+    tasm::TimingCollector::Instance()->MarkFrameworkTiming(
+        tasm::timing::kDataProcessorEnd);
+    return data;
+  }
 
   if (EnableDataProcessorOnJs()) {
     if (template_data == nullptr) {
