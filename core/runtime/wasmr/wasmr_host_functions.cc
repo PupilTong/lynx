@@ -45,6 +45,7 @@ constexpr int32_t kEventFlagCapture = 1 << 0;
 constexpr int32_t kEventFlagBubbles = 1 << 1;
 constexpr int32_t kEventFlagCancelable = 1 << 2;
 constexpr int32_t kEventFlagComposed = 1 << 3;
+constexpr const char kStyleAttribute[] = "style";
 
 struct WasmI32 {};
 struct WasmI64 {};
@@ -103,6 +104,7 @@ struct WasmModuleTimerState {
   bool cleanup_scheduled = false;
   int32_t next_element_ref = 0;
   int32_t next_event_ref = 0;
+  uint32_t event_listener_count = 0;
   std::unique_ptr<base::TimedTaskManager> timer_manager;
   std::unordered_set<uint32_t> timers;
   std::unordered_map<int32_t, ElementRef> element_refs;
@@ -135,7 +137,8 @@ std::shared_ptr<WasmModuleTimerState> GetWasmModuleTimerState(
 
 void MaybeEraseFinishedWasmModuleTimerState(
     const std::shared_ptr<WasmModuleTimerState>& state) {
-  if (!state || !state->entry_finished || !state->timers.empty()) {
+  if (!state || !state->entry_finished || !state->timers.empty() ||
+      state->event_listener_count != 0) {
     return;
   }
 
@@ -917,6 +920,9 @@ constexpr const char kSetStringAttributeSymbol[] = "__SetStringAttribute";
 constexpr const char kRemoveAttributeSymbol[] = "__RemoveAttribute";
 constexpr const char kGetStringAttributeByNameSymbol[] =
     "__GetStringAttributeByName";
+constexpr const char kGetEventTypeSymbol[] = "__GetEventType";
+constexpr const char kGetEventCurrentTargetUniqueIDSymbol[] =
+    "__GetEventCurrentTargetUniqueID";
 
 void DropElementHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
   DropElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1170,6 +1176,11 @@ void SetStringAttributeHostFunction(wasm_exec_env_t exec_env,
                                " attribute key must not be empty");
     return;
   }
+  if (key == kStyleAttribute) {
+    element->RemoveAllInlineStyles();
+    element->SetRawInlineStyles(base::String(value));
+    return;
+  }
   element->SetAttribute(base::String(key), lepus::Value(value));
 }
 
@@ -1187,6 +1198,10 @@ void RemoveAttributeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
   if (key.empty()) {
     SetException(exec_env, ExceptionPrefix(kFunction) +
                                " attribute key must not be empty");
+    return;
+  }
+  if (key == kStyleAttribute) {
+    element->RemoveAllInlineStyles();
     return;
   }
   element->SetAttribute(base::String(key), lepus::Value());
@@ -1450,6 +1465,7 @@ void AddEventListenerHostFunction(wasm_exec_env_t exec_env,
   }
   const uint32_t handler_id = static_cast<uint32_t>(raw_args[3]);
   const auto options = DecodeListenerOptions(static_cast<int32_t>(raw_args[4]));
+  state->event_listener_count++;
   element->SetJSEventHandler(base::String(event_type), base::String(),
                              base::String());
   element->AddEventListener(
@@ -1472,6 +1488,11 @@ void RemoveEventListenerHostFunction(wasm_exec_env_t exec_env,
   }
   const uint32_t handler_id = static_cast<uint32_t>(raw_args[3]);
   const auto options = DecodeListenerOptions(static_cast<int32_t>(raw_args[4]));
+  auto state = GetWasmModuleState(exec_env, kFunction);
+  if (state && state->event_listener_count > 0) {
+    state->event_listener_count--;
+    DeferEraseFinishedWasmModuleTimerState(state);
+  }
   element->RemoveEvent(base::String(event_type), base::String());
   element->RemoveEventListener(
       event_type,
@@ -1547,6 +1568,37 @@ void StopImmediatePropagationHostFunction(wasm_exec_env_t exec_env,
   if (ok) {
     event->set_is_stop_immediate_propagation(true);
   }
+}
+
+void GetEventTypeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  bool ok = true;
+  auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                           kGetEventTypeSymbol, &ok);
+  if (!ok) {
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+  raw_args[0] = static_cast<uint32_t>(WriteUtf8String(
+      exec_env, event->type(), static_cast<int32_t>(raw_args[1]),
+      static_cast<int32_t>(raw_args[2]), kGetEventTypeSymbol, &ok));
+}
+
+void GetEventCurrentTargetUniqueIDHostFunction(wasm_exec_env_t exec_env,
+                                               uint64_t* raw_args) {
+  bool ok = true;
+  auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                           kGetEventCurrentTargetUniqueIDSymbol, &ok);
+  if (!ok) {
+    raw_args[0] = static_cast<uint64_t>(-1);
+    return;
+  }
+  auto current_target = event->current_target();
+  if (!current_target) {
+    raw_args[0] = static_cast<uint64_t>(-1);
+    return;
+  }
+  raw_args[0] =
+      static_cast<uint64_t>(std::stoll(current_target->GetUniqueID()));
 }
 
 #define WASM_I32 "i"
@@ -1640,6 +1692,11 @@ NativeSymbol g_engine_host_symbols[] = {
                   SIG(WASM_REF, "")),
     CUSTOM_SYMBOL(tasm::kCFunctionStopImmediatePropagation,
                   StopImmediatePropagationHostFunction, SIG(WASM_REF, "")),
+    CUSTOM_SYMBOL(kGetEventTypeSymbol, GetEventTypeHostFunction,
+                  SIG(WASM_REF WASM_STRING_OUT, WASM_I32)),
+    CUSTOM_SYMBOL(kGetEventCurrentTargetUniqueIDSymbol,
+                  GetEventCurrentTargetUniqueIDHostFunction,
+                  SIG(WASM_REF, WASM_I64)),
     CUSTOM_SYMBOL(tasm::kSetTimeout, SetTimeoutHostFunction,
                   SIG(WASM_FUNC_REF WASM_I64, WASM_I64)),
     CUSTOM_SYMBOL(tasm::kClearTimeout, ClearTimeoutHostFunction,
