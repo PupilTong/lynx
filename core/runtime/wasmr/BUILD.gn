@@ -12,7 +12,10 @@ if (enable_wasmr) {
       "wasmr_runner.cc",
       "wasmr_runner.h",
     ]
-    deps = [ "../lepus/bindings:bindings" ]
+    deps = [
+      "../../renderer/css:css",
+      "../lepus/bindings:bindings",
+    ]
     public_deps = [ "../../../third_party/wasmr:wasmr" ]
   }
 } else {

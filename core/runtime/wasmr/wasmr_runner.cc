@@ -11,6 +11,7 @@
 #include "base/include/log/logging.h"
 #include "core/runtime/mts_context.h"
 #include "core/runtime/wasmr/wasmr_host_functions.h"
+#include "core/runtime/wasmr/wasmr_thread_env_guard.h"
 
 namespace lynx {
 namespace runtime {
@@ -167,6 +168,16 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
     return false;
   }
   SetEngineHostContext(exec_env, context);
+
+  WamrThreadEnvGuard thread_env;
+  if (!thread_env.ok()) {
+    SetError(error_msg,
+             "failed to execute WASM template: cannot initialize WAMR "
+             "thread environment");
+    wasm_runtime_destroy_exec_env(exec_env);
+    DestroyEngineHostModule(module_inst);
+    return false;
+  }
 
   const bool success = ExecuteExportedEntry(module_inst, exec_env, error_msg);
   if (success) {

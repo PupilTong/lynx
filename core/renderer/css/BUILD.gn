@@ -94,6 +94,7 @@ unittest_set("css_test_testset") {
     "transforms/transform_operation_unittest.cc",
     "transforms/transform_operations_unittest.cc",
     "unit_handler_unittest.cc",
+    "wasm/wasm_stylesheet_parser_unittest.cc",
   ]
 }
 
