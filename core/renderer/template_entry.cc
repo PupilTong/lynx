@@ -9,6 +9,7 @@
 
 #include "base/include/log/logging.h"
 #include "base/trace/native/trace_event.h"
+#include "core/renderer/css/parser/css_parser_configs.h"
 #include "core/renderer/dom/fiber/tree_resolver.h"
 #include "core/renderer/lynx_global_pool.h"
 #include "core/renderer/tasm/config.h"
@@ -34,6 +35,39 @@
 
 namespace lynx {
 namespace tasm {
+namespace {
+
+constexpr char kWamrPinnedTargetSdkVersion[] = "3.9";
+
+void PinWamrConfig(PageConfig& page_config, CompileOptions& compile_options) {
+  compile_options.target_sdk_version_ = kWamrPinnedTargetSdkVersion;
+  compile_options.default_overflow_visible_ = true;
+  compile_options.enable_remove_css_scope_ = true;
+  compile_options.enable_css_selector_ = true;
+  compile_options.enable_css_invalidation_ = true;
+
+  page_config.SetTargetSDKVersion(kWamrPinnedTargetSdkVersion);
+  page_config.SetEnableLepusNG(true);
+  page_config.SetEnableFiberArch(true);
+  page_config.SetEnableEventHandleRefactor(true);
+  page_config.SetEnableZIndex(true);
+  page_config.SetLynxAirMode(CompileOptionAirMode::AIR_MODE_OFF);
+  page_config.SetDefaultOverflowVisible(true);
+  page_config.SetEnableCSSInvalidation(true);
+  page_config.SetEnableStandardCSSSelector(true);
+  page_config.SetUseNewSwiper(true);
+  page_config.SetEnableNewIntersectionObserver(true);
+  page_config.SetEnableNativeList(TernaryBool::TRUE_VALUE);
+  page_config.SetSyncXElementRegistry(true);
+  page_config.SetEnableAccessibilityElement(false);
+  page_config.SetEnableCSSInheritance(false);
+  page_config.SetEnableNewGesture(false);
+  page_config.SetRemoveDescendantSelectorScope(true);
+  page_config.SetCSSParserConfigs(
+      CSSParserConfigs::GetCSSParserConfigsByComplierOptions(compile_options));
+}
+
+}  // namespace
 
 TemplateEntry::TemplateEntry() : VmContextHolder(nullptr) {
   TRACE_EVENT(LYNX_TRACE_CATEGORY, TEMPLATE_ENTRY_CONSTRUCTOR);
@@ -351,11 +385,8 @@ bool TemplateEntry::InitWithWasmTemplate(
     page_config = std::make_shared<PageConfig>();
     page_configger->SetPageConfig(page_config);
   }
-  page_config->SetEnableLepusNG(true);
-  page_config->SetEnableFiberArch(true);
-  page_config->SetEnableEventHandleRefactor(true);
-  page_config->SetEnableZIndex(true);
-  page_config->SetLynxAirMode(CompileOptionAirMode::AIR_MODE_OFF);
+  PinWamrConfig(*page_config, template_bundle_.compile_options_);
+  page_configger->SetTargetSdkVersion(page_config->GetTargetSDKVersion());
 
   if (is_card_) {
     page_configger->SetSupportComponentJS(false);
@@ -378,7 +409,7 @@ bool TemplateEntry::InitWithWasmTemplate(
   }
 
   vm_context_->SetWasmModule(std::move(source), std::move(url));
-  vm_context_->SetSdkVersion(assembler->target_sdk_version_);
+  vm_context_->SetSdkVersion(page_config->GetTargetSDKVersion());
   vm_context_->Initialize();
   SetName(DEFAULT_ENTRY_NAME);
   vm_context_->set_name(DEFAULT_ENTRY_NAME);
