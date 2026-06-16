@@ -193,6 +193,10 @@ lynx_css_core_sources = [
   "style_node.h",
   "unit_handler.cc",
   "unit_handler.h",
+  "wasm/css_token_stream_view.cc",
+  "wasm/css_token_stream_view.h",
+  "wasm/wasm_stylesheet_parser.cc",
+  "wasm/wasm_stylesheet_parser.h",
 ]
 
 if (!enable_unittests) {

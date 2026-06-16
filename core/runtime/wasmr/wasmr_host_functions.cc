@@ -28,10 +28,16 @@
 #include "core/renderer/dom/fiber/block_element.h"
 #include "core/renderer/dom/fiber/fiber_element.h"
 #include "core/renderer/dom/selector/fiber_element_selector.h"
+#include "core/renderer/css/wasm/css_token_stream_view.h"
+#include "core/renderer/css/wasm/wasm_stylesheet_parser.h"
 #include "core/renderer/utils/base/tasm_constants.h"
+#include "core/renderer/template_assembler.h"
 #include "core/runtime/lepus/bindings/renderer.h"
 #include "core/runtime/lepus/bindings/renderer_functions.h"
+#include "core/runtime/lepus/bindings/style/shared_css_fragment_wrapper.h"
 #include "core/runtime/mts_context.h"
+#include "core/runtime/wasmr/wasmr_thread_env_guard.h"
+#include "core/shell/runtime/mts/mts_runtime.h"
 
 namespace lynx {
 namespace runtime {
@@ -368,6 +374,14 @@ void InvokeWasmTimerCallback(
   }
 
   SetEngineHostContext(callback_env, state->context);
+  WamrThreadEnvGuard thread_env;
+  if (!thread_env.ok()) {
+    ReportTimerException(state, function_name,
+                         "failed to initialize WAMR thread environment");
+    wasm_runtime_destroy_exec_env(callback_env);
+    return;
+  }
+
   uint32_t argv[] = {timer_id};
   if (!wasm_runtime_call_indirect(callback_env, callback_index,
                                   static_cast<uint32_t>(std::size(argv)),
@@ -397,6 +411,14 @@ void InvokeWasmEventCallback(
   }
 
   SetEngineHostContext(callback_env, state->context);
+  WamrThreadEnvGuard thread_env;
+  if (!thread_env.ok()) {
+    ReportTimerException(state, function_name,
+                         "failed to initialize WAMR thread environment");
+    wasm_runtime_destroy_exec_env(callback_env);
+    return;
+  }
+
   int32_t event_id = StoreEventRef(state, event, callback_env, function_name);
   if (event_id >= 0) {
     uint32_t argv[] = {static_cast<uint32_t>(event_id)};
@@ -918,6 +940,9 @@ constexpr const char kDropElementBindingSymbol[] = "binding__DropElement";
 constexpr const char kDropEventBindingSymbol[] = "binding__DropEvent";
 constexpr const char kSetStringAttributeSymbol[] = "__SetStringAttribute";
 constexpr const char kRemoveAttributeSymbol[] = "__RemoveAttribute";
+constexpr const char kAdoptStyleSheetTokensSymbol[] = "__AdoptStyleSheetTokens";
+constexpr const char kReplaceStyleSheetsTokensSymbol[] =
+    "__ReplaceStyleSheetsTokens";
 constexpr const char kGetStringAttributeByNameSymbol[] =
     "__GetStringAttributeByName";
 constexpr const char kGetEventTypeSymbol[] = "__GetEventType";
@@ -1205,6 +1230,97 @@ void RemoveAttributeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
     return;
   }
   element->SetAttribute(base::String(key), lepus::Value());
+}
+
+void MarkTreeStyleDirty(tasm::ElementManager* manager) {
+  if (!manager) {
+    return;
+  }
+  auto root = static_cast<tasm::FiberElement*>(manager->root());
+  if (root) {
+    root->ApplyFunctionRecursive(
+        [](auto element) { element->MarkStyleDirty(false); });
+  }
+}
+
+tasm::TemplateAssembler* GetTemplateAssembler(wasm_exec_env_t exec_env,
+                                              const char* function_name) {
+  auto* context = GetEngineHostContext(exec_env);
+  if (context == nullptr) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " missing Lynx runtime context");
+    return nullptr;
+  }
+  auto* runtime = MTSRuntime::ToContext(context);
+  if (runtime == nullptr || runtime->GetDelegate() == nullptr) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " missing Lynx runtime delegate");
+    return nullptr;
+  }
+  return static_cast<tasm::TemplateAssembler*>(runtime->GetDelegate());
+}
+
+void ApplyStyleSheetTokensHostFunction(wasm_exec_env_t exec_env,
+                                       uint64_t* raw_args,
+                                       const char* function_name,
+                                       bool replace) {
+  auto* tasm = GetTemplateAssembler(exec_env, function_name);
+  if (!tasm || !tasm->page_proxy()) {
+    return;
+  }
+
+  const int32_t bytes_offset = static_cast<int32_t>(raw_args[0]);
+  const int32_t bytes_length = static_cast<int32_t>(raw_args[1]);
+  if (!ValidateAppMemory(exec_env, bytes_offset, bytes_length, function_name,
+                         " CSS token stream")) {
+    return;
+  }
+  if (bytes_length <= 0) {
+    SetException(exec_env, ExceptionPrefix(function_name) +
+                               " CSS token stream must not be empty");
+    return;
+  }
+
+  auto* bytes =
+      static_cast<const uint8_t*>(AppAddrToNative(exec_env, bytes_offset));
+  tasm::css_wasm::CSSTokenStreamView stream(
+      bytes, static_cast<size_t>(bytes_length));
+  auto* manager = tasm->page_proxy()->element_manager().get();
+  if (!manager) {
+    SetException(exec_env,
+                 ExceptionPrefix(function_name) + " missing ElementManager");
+    return;
+  }
+
+  const bool enable_css_invalidation =
+      tasm->GetPageConfig() && tasm->GetPageConfig()->GetEnableCSSInvalidation();
+  auto result = tasm::css_wasm::ParseStyleSheetTokenStream(
+      stream, manager->GetCSSParserConfigs(), enable_css_invalidation);
+  if (!result.fragment) {
+    SetException(exec_env,
+                 ExceptionPrefix(function_name) + " " + result.error);
+    return;
+  }
+
+  if (replace) {
+    manager->ClearAdoptedStyleSheets();
+  }
+  auto wrapper = fml::MakeRefCounted<tasm::SharedCSSFragmentWrapper>(
+      std::move(result.fragment));
+  manager->AdoptStyleSheet(std::move(wrapper));
+  MarkTreeStyleDirty(manager);
+}
+
+void AdoptStyleSheetTokensHostFunction(wasm_exec_env_t exec_env,
+                                       uint64_t* raw_args) {
+  ApplyStyleSheetTokensHostFunction(exec_env, raw_args,
+                                    kAdoptStyleSheetTokensSymbol, false);
+}
+
+void ReplaceStyleSheetsTokensHostFunction(wasm_exec_env_t exec_env,
+                                          uint64_t* raw_args) {
+  ApplyStyleSheetTokensHostFunction(exec_env, raw_args,
+                                    kReplaceStyleSheetsTokensSymbol, true);
 }
 
 void SetIDHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
@@ -1651,6 +1767,10 @@ NativeSymbol g_engine_host_symbols[] = {
                   SIG(WASM_REF WASM_STRING WASM_STRING, "")),
     CUSTOM_SYMBOL(kRemoveAttributeSymbol, RemoveAttributeHostFunction,
                   SIG(WASM_REF WASM_STRING, "")),
+    CUSTOM_SYMBOL(kAdoptStyleSheetTokensSymbol, AdoptStyleSheetTokensHostFunction,
+                  SIG(WASM_STRING, "")),
+    CUSTOM_SYMBOL(kReplaceStyleSheetsTokensSymbol,
+                  ReplaceStyleSheetsTokensHostFunction, SIG(WASM_STRING, "")),
     SYMBOL(kAddClassBinding, SIG(WASM_REF WASM_STRING, "")),
     SYMBOL(kSetClassesBinding, SIG(WASM_REF WASM_STRING, "")),
     CUSTOM_SYMBOL(tasm::kCFunctionGetClasses, GetClassesHostFunction,

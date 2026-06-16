@@ -354,7 +354,8 @@ bool TemplateEntry::InitWithWasmTemplate(
   page_config->SetEnableLepusNG(true);
   page_config->SetEnableFiberArch(true);
   page_config->SetEnableEventHandleRefactor(true);
-  page_config->SetLynxAirMode(CompileOptionAirMode::AIR_MODE_FIBER);
+  page_config->SetEnableZIndex(true);
+  page_config->SetLynxAirMode(CompileOptionAirMode::AIR_MODE_OFF);
 
   if (is_card_) {
     page_configger->SetSupportComponentJS(false);

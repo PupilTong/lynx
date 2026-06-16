@@ -200,7 +200,13 @@ if (enable_wasmr) {
       if (!is_android) {
         cflags += [ "-Wno-cast-function-type" ]
       } else {
-        cflags += [ "-Wno-newline-eof" ]
+        cflags += [
+          "-Wno-newline-eof",
+
+          # SIMDE's portable wasm SIMD helpers can trip Android Clang 9 LTO
+          # vectorizer diagnostics under global linker fatal-warnings.
+          "-fno-lto",
+        ]
       }
       cflags_c = [ "-std=gnu99" ]
     }
