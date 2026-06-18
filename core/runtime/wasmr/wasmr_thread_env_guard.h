@@ -14,14 +14,21 @@ namespace wasmr {
 class WamrThreadEnvGuard {
  public:
   WamrThreadEnvGuard() {
-    if (wasm_runtime_thread_env_inited()) {
+    auto& depth = GuardDepth();
+    if (depth > 0) {
+      ++depth;
       ok_ = true;
       return;
     }
+
+    // WAMR's wasm_runtime_thread_env_inited() does not check the POSIX signal
+    // env when AOT is disabled, while the interpreter still requires it for
+    // hardware bound checks. Initialize explicitly for each outer guard.
     if (!wasm_runtime_init_thread_env()) {
       return;
     }
-    owns_thread_env_ = true;
+    ++depth;
+    outer_guard_ = true;
     ok_ = true;
   }
 
@@ -29,7 +36,14 @@ class WamrThreadEnvGuard {
   WamrThreadEnvGuard& operator=(const WamrThreadEnvGuard&) = delete;
 
   ~WamrThreadEnvGuard() {
-    if (owns_thread_env_) {
+    if (!ok_) {
+      return;
+    }
+    auto& depth = GuardDepth();
+    if (depth > 0) {
+      --depth;
+    }
+    if (outer_guard_ && depth == 0) {
       wasm_runtime_destroy_thread_env();
     }
   }
@@ -37,7 +51,12 @@ class WamrThreadEnvGuard {
   bool ok() const { return ok_; }
 
  private:
-  bool owns_thread_env_ = false;
+  static int& GuardDepth() {
+    static thread_local int depth = 0;
+    return depth;
+  }
+
+  bool outer_guard_ = false;
   bool ok_ = false;
 };
 

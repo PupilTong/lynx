@@ -31,6 +31,7 @@
 #include "core/renderer/css/wasm/css_token_stream_view.h"
 #include "core/renderer/css/wasm/wasm_stylesheet_parser.h"
 #include "core/renderer/utils/base/tasm_constants.h"
+#include "core/renderer/utils/value_utils.h"
 #include "core/renderer/template_assembler.h"
 #include "core/runtime/lepus/bindings/renderer.h"
 #include "core/runtime/lepus/bindings/renderer_functions.h"
@@ -52,6 +53,11 @@ constexpr int32_t kEventFlagBubbles = 1 << 1;
 constexpr int32_t kEventFlagCancelable = 1 << 2;
 constexpr int32_t kEventFlagComposed = 1 << 3;
 constexpr const char kStyleAttribute[] = "style";
+
+std::shared_ptr<tasm::PipelineOptions>& CurrentEngineHostPipelineOptions() {
+  static thread_local std::shared_ptr<tasm::PipelineOptions> pipeline_options;
+  return pipeline_options;
+}
 
 struct WasmI32 {};
 struct WasmI64 {};
@@ -1364,6 +1370,17 @@ void FlushElementTreeHostFunction(wasm_exec_env_t exec_env,
     }
     args.emplace_back(root);
   }
+  auto pipeline_options = CurrentEngineHostPipelineOptions();
+  if (pipeline_options != nullptr) {
+    if (args.empty()) {
+      args.emplace_back(lepus::Value());
+    }
+    lepus::Value options(lepus::Dictionary::Create());
+    BASE_STATIC_STRING_DECL(kPipelineOptions, "pipelineOptions");
+    options.SetProperty(kPipelineOptions,
+                        tasm::PipelineOptionsToLepusValue(pipeline_options));
+    args.emplace_back(std::move(options));
+  }
   tasm::RendererFunctions::FiberFlushElementTree(
       context, args.empty() ? nullptr : args.data(),
       static_cast<int>(args.size()));
@@ -1853,8 +1870,8 @@ bool RegisterEngineHostFunctions() {
 void RegisterEngineHostModule(wasm_module_t module,
                               wasm_module_inst_t module_inst,
                               MTSContext* context) {
-  auto state = std::make_shared<WasmModuleTimerState>(module, module_inst,
-                                                      context);
+  auto state =
+      std::make_shared<WasmModuleTimerState>(module, module_inst, context);
   std::lock_guard<std::mutex> lock(WasmModuleTimerStatesMutex());
   auto& states = WasmModuleTimerStates();
   auto old_state = states.find(module_inst);
@@ -1923,6 +1940,11 @@ MTSContext* GetEngineHostContext(wasm_exec_env_t exec_env) {
   }
   return static_cast<MTSContext*>(
       wasm_runtime_get_custom_data(wasm_runtime_get_module_inst(exec_env)));
+}
+
+void SetEngineHostPipelineOptions(
+    std::shared_ptr<tasm::PipelineOptions> pipeline_options) {
+  CurrentEngineHostPipelineOptions() = std::move(pipeline_options);
 }
 
 }  // namespace wasmr

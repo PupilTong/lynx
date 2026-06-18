@@ -12,6 +12,8 @@
 #include "core/runtime/mts_context.h"
 #include "core/runtime/wasmr/wasmr_host_functions.h"
 #include "core/runtime/wasmr/wasmr_thread_env_guard.h"
+#include "core/services/timing_handler/timing.h"
+#include "core/services/timing_handler/timing_constants.h"
 
 namespace lynx {
 namespace runtime {
@@ -135,10 +137,14 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
   }
 
   char error_buf[kWasmErrorBufferSize] = {};
+  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
+      tasm::timing::kWamrLoadStart);
   wasm_module_t module =
       wasm_runtime_load(const_cast<uint8_t*>(data),
                         static_cast<uint32_t>(size), error_buf,
                         static_cast<uint32_t>(sizeof(error_buf)));
+  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
+      tasm::timing::kWamrLoadEnd);
   if (module == nullptr) {
     SetError(error_msg, BuildWamrError("failed to load WASM template",
                                        error_buf));
@@ -179,7 +185,11 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
     return false;
   }
 
+  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
+      tasm::timing::kWamrEntryStart);
   const bool success = ExecuteExportedEntry(module_inst, exec_env, error_msg);
+  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
+      tasm::timing::kWamrEntryEnd);
   if (success) {
     LOGI("executed WASM template: " << url);
   }

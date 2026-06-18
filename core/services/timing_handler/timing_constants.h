@@ -192,6 +192,10 @@ static constexpr const char kTemplateBundleParseStart[] =
     "templateBundleParseStart";
 static constexpr const char kTemplateBundleParseEnd[] =
     "templateBundleParseEnd";
+static constexpr const char kWamrLoadStart[] = "wamrLoadStart";
+static constexpr const char kWamrLoadEnd[] = "wamrLoadEnd";
+static constexpr const char kWamrEntryStart[] = "wamrEntryStart";
+static constexpr const char kWamrEntryEnd[] = "wamrEntryEnd";
 // ================== UNSPECIFIED ==================
 
 }  // namespace timing

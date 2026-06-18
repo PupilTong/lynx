@@ -265,7 +265,8 @@ bool LynxEnv::EnableLongTaskTiming() {
 }
 
 bool LynxEnv::EnableMemoryMonitor() {
-  return GetBoolEnv(Key::ENABLE_MEMORY_MONITOR, false);
+  return GetBoolEnv(Key::ENABLE_MEMORY_MONITOR, false) ||
+         GetBoolEnv(Key::ENABLE_MEMORY_MONITOR, false, EnvType::LOCAL);
 }
 
 bool LynxEnv::EnableJSBlockingMonitor() {

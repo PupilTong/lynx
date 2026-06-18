@@ -73,6 +73,11 @@ const ITEMS: ItemProps[] = [
     url: 'file://lynx?local://showcase/menu/list.lynx.bundle',
   },
   {
+    title: 'Performance',
+    description: 'Compare ReactLynx3 and WAMR render timings',
+    url: 'file://lynx?local://showcase/menu/performance.lynx.bundle',
+  },
+  {
     title: 'Rust Wasm',
     description: 'Examples built with Yew and WAMR host bindings',
     url: 'file://lynx?local://showcase/menu/rustwasm.lynx.bundle',

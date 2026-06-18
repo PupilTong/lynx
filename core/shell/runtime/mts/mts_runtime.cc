@@ -148,9 +148,12 @@ bool MTSRuntime::Execute(const ContextBundle* bundle) {
   if (IsWasmContext()) {
 #if ENABLE_WASMR
     std::string error_msg;
-    if (!wasmr::ExecuteWasmModule(wasm_module_.data(), wasm_module_.size(),
-                                  mts_context_.get(), wasm_module_url_,
-                                  &error_msg)) {
+    wasmr::SetEngineHostPipelineOptions(wasm_pipeline_options_);
+    const bool success = wasmr::ExecuteWasmModule(
+        wasm_module_.data(), wasm_module_.size(), mts_context_.get(),
+        wasm_module_url_, &error_msg);
+    wasmr::SetEngineHostPipelineOptions(nullptr);
+    if (!success) {
       ReportErrorWithMsg(error_msg, error::E_APP_BUNDLE_LOAD_RENDER_FAILED);
       return false;
     }
@@ -167,6 +170,11 @@ bool MTSRuntime::Execute(const ContextBundle* bundle) {
 void MTSRuntime::SetWasmModule(std::vector<uint8_t> module, std::string url) {
   wasm_module_ = std::move(module);
   wasm_module_url_ = std::move(url);
+}
+
+void MTSRuntime::SetWasmPipelineOptions(
+    std::shared_ptr<tasm::PipelineOptions> pipeline_options) {
+  wasm_pipeline_options_ = std::move(pipeline_options);
 }
 
 void MTSRuntime::EnsureLynx() {
@@ -435,6 +443,7 @@ void MTSRuntime::SetGCThreshold(int64_t threshold) {
 inline constexpr char kRawRuntimeMemoryInfo[] = "raw_memory_info_json_str";
 
 void MTSRuntime::OnGC(std::string mem_info) {
+  EnsureDelegate();
   if (!delegate_) {
     return;
   }
@@ -442,6 +451,7 @@ void MTSRuntime::OnGC(std::string mem_info) {
 }
 
 void MTSRuntime::ReportGCTimingEvent(const char* start, const char* end) {
+  EnsureDelegate();
   if (!delegate_) {
     return;
   }

@@ -6,10 +6,15 @@
 #define CORE_RUNTIME_WASMR_WASMR_HOST_FUNCTIONS_H_
 
 #include <cstdint>
+#include <memory>
 
 #include "wasm_export.h"
 
 namespace lynx {
+namespace tasm {
+struct PipelineOptions;
+}  // namespace tasm
+
 namespace runtime {
 
 class MTSContext;
@@ -46,6 +51,9 @@ void DestroyEngineHostModulesForContext(MTSContext* context);
 void SetEngineHostContext(wasm_exec_env_t exec_env, MTSContext* context);
 
 MTSContext* GetEngineHostContext(wasm_exec_env_t exec_env);
+
+void SetEngineHostPipelineOptions(
+    std::shared_ptr<tasm::PipelineOptions> pipeline_options);
 
 }  // namespace wasmr
 }  // namespace runtime

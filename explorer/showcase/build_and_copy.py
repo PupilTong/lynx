@@ -29,7 +29,6 @@ RUST_WASM_TARGET_FEATURES = ",".join([
     "+nontrapping-fptoint",
     "+reference-types",
     "+sign-ext",
-    "+simd128",
     "+tail-call",
 ])
 RUST_WASM_RELEASE_PROFILE = {
@@ -51,7 +50,6 @@ WASM_OPT_FLAGS = [
     "--enable-bulk-memory-opt",
     "--enable-reference-types",
     "--enable-multivalue",
-    "--enable-simd",
     "--enable-tail-call",
     "--enable-gc",
     "--enable-memory64",
@@ -151,9 +149,27 @@ def copy_rust_wasm_file(wasm_file, showcase_dirs):
         shutil.copy(wasm_file, os.path.join(rust_wasm_dir,
                                             RUST_WASM_FILE_NAME))
 
-def main():
-    from tools.js_tools.pnpm_helper import run_pnpm_command
 
+def resolve_pnpm_runner():
+    try:
+        from tools.js_tools.pnpm_helper import run_pnpm_command
+        return run_pnpm_command
+    except (ImportError, TypeError):
+        pnpm_path = shutil.which("pnpm")
+        if pnpm_path is None:
+            raise
+
+        def run_system_pnpm_command(command, cwd, env=None):
+            resolved_command = list(command)
+            if resolved_command and resolved_command[0] == "pnpm":
+                resolved_command[0] = pnpm_path
+            run_checked_command(resolved_command, cwd, env)
+
+        return run_system_pnpm_command
+
+
+def main():
+    run_pnpm_command = resolve_pnpm_runner()
     # Get the showcase root directory
     showcase_root_dir = os.path.dirname(os.path.abspath(__file__))
     explorer_dir = os.path.dirname(showcase_root_dir)
