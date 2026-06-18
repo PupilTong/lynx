@@ -5,7 +5,6 @@
 #ifndef CORE_RUNTIME_WASMR_WASMR_HOST_FUNCTIONS_H_
 #define CORE_RUNTIME_WASMR_WASMR_HOST_FUNCTIONS_H_
 
-#include <cstddef>
 #include <cstdint>
 #include <memory>
 
@@ -34,8 +33,7 @@ bool RegisterEngineHostFunctions();
 // guest after the entry function returns, such as setTimeout / setInterval.
 void RegisterEngineHostModule(wasm_module_t module,
                               wasm_module_inst_t module_inst,
-                              MTSContext* context, size_t module_size,
-                              uint32_t host_managed_heap_size);
+                              MTSContext* context);
 
 // Marks the initial entry call as finished. If no async host callbacks are
 // pending, the module instance is released immediately; otherwise it is kept

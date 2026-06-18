@@ -5,6 +5,7 @@
 #include "core/services/timing_handler/timing_info.h"
 
 #include <algorithm>
+
 #include "base/include/string/string_utils.h"
 #include "base/include/value/table.h"
 #include "core/services/timing_handler/timing_constants.h"

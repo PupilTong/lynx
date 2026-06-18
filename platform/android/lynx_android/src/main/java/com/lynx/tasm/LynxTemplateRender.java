@@ -1488,7 +1488,6 @@ public class LynxTemplateRender
   private TimingOption createTimingOption(String pipelineOrigin, String startTimingType) {
     TimingOption timingOption = TimingOption.createTimingOption(
         pipelineOrigin, startTimingType, mPerformanceController.isEmbeddedMode());
-    timingOption.setExtraTiming(mPerformanceController.getExtraTimingForLoadTemplate());
     if (mPerformanceController.isEmbeddedMode()) {
       mPerformanceController.markTiming(startTimingType, null);
     }

@@ -65,15 +65,9 @@ bool EnsureWamrInitialized(std::string* error_msg) {
 bool CallWasmFunction(wasm_module_inst_t module_inst, wasm_exec_env_t exec_env,
                       wasm_function_inst_t function,
                       const char* function_name, std::string* error_msg) {
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrFunctionCallStart);
   if (wasm_runtime_call_wasm(exec_env, function, 0, nullptr)) {
-    tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-        tasm::timing::kWamrFunctionCallEnd);
     return true;
   }
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrFunctionCallEnd);
 
   const char* exception = wasm_runtime_get_exception(module_inst);
   const std::string prefix =
@@ -138,15 +132,9 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
     SetError(error_msg, "failed to execute WASM template: missing MTS context");
     return false;
   }
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrRuntimeInitStart);
   if (!EnsureWamrInitialized(error_msg)) {
-    tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-        tasm::timing::kWamrRuntimeInitEnd);
     return false;
   }
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrRuntimeInitEnd);
 
   char error_buf[kWasmErrorBufferSize] = {};
   tasm::TimingCollector::Instance()->MarkFrameworkTiming(
@@ -163,14 +151,10 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
     return false;
   }
 
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrInstantiateStart);
   wasm_module_inst_t module_inst =
       wasm_runtime_instantiate(module, kWasmStackSize, kWasmHeapSize,
                                error_buf,
                                static_cast<uint32_t>(sizeof(error_buf)));
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrInstantiateEnd);
   if (module_inst == nullptr) {
     SetError(error_msg, BuildWamrError("failed to instantiate WASM template",
                                        error_buf));
@@ -178,15 +162,11 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
     return false;
   }
 
-  RegisterEngineHostModule(module, module_inst, context, size, kWasmHeapSize);
+  RegisterEngineHostModule(module, module_inst, context);
   wasm_runtime_set_custom_data(module_inst, context);
 
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrCreateExecEnvStart);
   wasm_exec_env_t exec_env =
       wasm_runtime_create_exec_env(module_inst, kWasmStackSize);
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrCreateExecEnvEnd);
   if (exec_env == nullptr) {
     SetError(error_msg,
              "failed to execute WASM template: cannot create exec env");
@@ -195,11 +175,7 @@ bool ExecuteWasmModule(const uint8_t* data, size_t size, MTSContext* context,
   }
   SetEngineHostContext(exec_env, context);
 
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrThreadEnvStart);
   WamrThreadEnvGuard thread_env;
-  tasm::TimingCollector::Instance()->MarkFrameworkTiming(
-      tasm::timing::kWamrThreadEnvEnd);
   if (!thread_env.ok()) {
     SetError(error_msg,
              "failed to execute WASM template: cannot initialize WAMR "

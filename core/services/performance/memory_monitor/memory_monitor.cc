@@ -133,7 +133,7 @@ bool MemoryMonitor::Enable() {
     return args.force_enable_ ==
            True;  // Force setting takes absolute precedence
   }
-  return LynxEnv::GetInstance().EnableMemoryMonitor();
+  return args.env_enable_;
 }
 
 // External control interface (sets highest priority flag)
