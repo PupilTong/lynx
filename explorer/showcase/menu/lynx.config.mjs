@@ -16,6 +16,7 @@ export default defineConfig({
       list: './sub-menu/list.tsx',
       performance: './sub-menu/performance.tsx',
       reactexample: '../../../examples/react/src/index.tsx',
+      colorfulview: '../../../examples/react/src/colorful-view/index.tsx',
       rustwasm: './sub-menu/rust-wasm.tsx',
       scrollview: './sub-menu/scrollview.tsx',
       text: './sub-menu/text.tsx',

@@ -18,6 +18,13 @@ const ITEMS: ItemProps[] = [
       `${PERF_QUERY}&perf_label=ReactLynx3`,
   },
   {
+    title: 'ReactLynx3 ColorfulView',
+    description: 'Nested colorful view benchmark from CrossPlatformBenchmark',
+    url:
+      'file://lynx?local://showcase/menu/colorfulview.lynx.bundle?' +
+      `${PERF_QUERY}&perf_label=ReactLynx3_ColorfulView`,
+  },
+  {
     title: 'WAMR Yew',
     description: 'Rust/Yew wasm32-wasip1 bundle optimized for WAMR',
     url:
