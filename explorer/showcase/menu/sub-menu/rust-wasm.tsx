@@ -13,6 +13,11 @@ const ITEMS: ItemProps[] = [
     description: 'A Yew example compiled to wasm32-wasip1 for WAMR',
     url: 'file://lynx?local://showcase/rust-wasm/react.wasm',
   },
+  {
+    title: 'ColorfulView Yew',
+    description: 'Nested colorful view benchmark compiled from Rust/Yew',
+    url: 'file://lynx?local://showcase/rust-wasm/colorful-view.wasm',
+  },
 ];
 
 root.render(

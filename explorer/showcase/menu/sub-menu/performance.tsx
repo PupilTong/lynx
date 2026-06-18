@@ -24,6 +24,13 @@ const ITEMS: ItemProps[] = [
       'file://lynx?local://showcase/rust-wasm/react.wasm?' +
       `${PERF_QUERY}&perf_label=WAMR`,
   },
+  {
+    title: 'WAMR ColorfulView',
+    description: 'Rust/Yew nested colorful view benchmark for WAMR',
+    url:
+      'file://lynx?local://showcase/rust-wasm/colorful-view.wasm?' +
+      `${PERF_QUERY}&perf_label=WAMR_ColorfulView`,
+  },
 ];
 
 root.render(
