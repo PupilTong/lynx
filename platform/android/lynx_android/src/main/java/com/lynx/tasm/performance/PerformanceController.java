@@ -57,6 +57,8 @@ public class PerformanceController implements IMemoryMonitor, ITimingCollector {
   private WeakReference<IPerformanceObserver> mObserver;
   private WeakReference<ILynxEventReporterService> mEventReporterService;
   private boolean mUseEmbeddedMode = false;
+  private TimingHandler.ExtraTimingInfo mPendingExtraTiming;
+  private TimingHandler.ExtraTimingInfo mLatestExtraTiming;
   private JavaOnlyMap mHostPlatformTiming;
   private JavaOnlyArray mPendingPaintEndPipelineIds = new JavaOnlyArray();
   private int mInstanceId = LynxEventReporter.INSTANCE_ID_UNKNOWN;
@@ -91,9 +93,7 @@ public class PerformanceController implements IMemoryMonitor, ITimingCollector {
   public static boolean isMemoryMonitorEnabled() {
     if (isNativeLibraryLoaded()) {
       LynxBooleanOption op = sIsMemoryMonitorEnabled;
-      if (op == LynxBooleanOption.FALSE) {
-        return false;
-      } else if (op == LynxBooleanOption.UNSET) {
+      if (op == LynxBooleanOption.UNSET || op == LynxBooleanOption.FALSE) {
         boolean ret = nativeIsMemoryMonitorEnabled();
         sIsMemoryMonitorEnabled = ret ? LynxBooleanOption.TRUE : LynxBooleanOption.FALSE;
         return ret;
@@ -337,34 +337,21 @@ public class PerformanceController implements IMemoryMonitor, ITimingCollector {
   }
 
   public void setExtraTiming(TimingHandler.ExtraTimingInfo extraTiming) {
-    if (isEmbeddedMode()) {
-      // Embedded mode: no extra timing needed
+    if (extraTiming == null) {
       return;
     }
+    if (isEmbeddedMode()) {
+      ensureEmbeddedCollectorInitialized();
+      mEmbeddedTimingCollector.setExtraTiming(extraTiming);
+      return;
+    }
+    setPendingExtraTiming(extraTiming);
     runOnReportThread(() -> {
       if (mNativePerformanceActorPtr == 0) {
         return;
       }
-      if (extraTiming.mOpenTime > 0) {
-        nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.OPEN_TIME,
-            extraTiming.mOpenTime * 1000, null);
-      }
-      if (extraTiming.mContainerInitStart > 0) {
-        nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.CONTAINER_INIT_START,
-            extraTiming.mContainerInitStart * 1000, null);
-      }
-      if (extraTiming.mContainerInitEnd > 0) {
-        nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.CONTAINER_INIT_END,
-            extraTiming.mContainerInitEnd * 1000, null);
-      }
-      if (extraTiming.mPrepareTemplateStart > 0) {
-        nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.PREPARE_TEMPLATE_START,
-            extraTiming.mPrepareTemplateStart * 1000, null);
-      }
-      if (extraTiming.mPrepareTemplateEnd > 0) {
-        nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.PREPARE_TEMPLATE_END,
-            extraTiming.mPrepareTemplateEnd * 1000, null);
-      }
+      TimingHandler.ExtraTimingInfo pendingExtraTiming = takePendingExtraTiming();
+      setExtraTimingOnReportThread(pendingExtraTiming);
     });
   }
 
@@ -374,6 +361,10 @@ public class PerformanceController implements IMemoryMonitor, ITimingCollector {
       return;
     }
     mNativePerformanceActorPtr = nativePtr;
+    if (nativePtr != 0) {
+      TimingHandler.ExtraTimingInfo pendingExtraTiming = takePendingExtraTiming();
+      setExtraTimingOnReportThread(pendingExtraTiming);
+    }
   }
 
   @CalledByNative
@@ -433,6 +424,60 @@ public class PerformanceController implements IMemoryMonitor, ITimingCollector {
       props.put(PIPELINE_ID, pipelineId);
       props.put(INSTANCE_ID, String.valueOf(mInstanceId));
       TraceEvent.instant(TraceEvent.CATEGORY_DEFAULT, prefix + "." + timingKey, props);
+    }
+  }
+
+  private synchronized void setPendingExtraTiming(TimingHandler.ExtraTimingInfo extraTiming) {
+    mPendingExtraTiming = copyExtraTiming(extraTiming);
+    mLatestExtraTiming = copyExtraTiming(extraTiming);
+  }
+
+  private synchronized TimingHandler.ExtraTimingInfo takePendingExtraTiming() {
+    TimingHandler.ExtraTimingInfo pendingExtraTiming = mPendingExtraTiming;
+    mPendingExtraTiming = null;
+    return pendingExtraTiming;
+  }
+
+  public synchronized TimingHandler.ExtraTimingInfo getExtraTimingForLoadTemplate() {
+    return copyExtraTiming(mLatestExtraTiming);
+  }
+
+  private TimingHandler.ExtraTimingInfo copyExtraTiming(TimingHandler.ExtraTimingInfo extraTiming) {
+    if (extraTiming == null) {
+      return null;
+    }
+    TimingHandler.ExtraTimingInfo copy = new TimingHandler.ExtraTimingInfo();
+    copy.mOpenTime = extraTiming.mOpenTime;
+    copy.mContainerInitStart = extraTiming.mContainerInitStart;
+    copy.mContainerInitEnd = extraTiming.mContainerInitEnd;
+    copy.mPrepareTemplateStart = extraTiming.mPrepareTemplateStart;
+    copy.mPrepareTemplateEnd = extraTiming.mPrepareTemplateEnd;
+    return copy;
+  }
+
+  private void setExtraTimingOnReportThread(TimingHandler.ExtraTimingInfo extraTiming) {
+    if (extraTiming == null || mNativePerformanceActorPtr == 0) {
+      return;
+    }
+    if (extraTiming.mOpenTime > 0) {
+      nativeSetTiming(
+          mNativePerformanceActorPtr, TimingHandler.OPEN_TIME, extraTiming.mOpenTime * 1000, null);
+    }
+    if (extraTiming.mContainerInitStart > 0) {
+      nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.CONTAINER_INIT_START,
+          extraTiming.mContainerInitStart * 1000, null);
+    }
+    if (extraTiming.mContainerInitEnd > 0) {
+      nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.CONTAINER_INIT_END,
+          extraTiming.mContainerInitEnd * 1000, null);
+    }
+    if (extraTiming.mPrepareTemplateStart > 0) {
+      nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.PREPARE_TEMPLATE_START,
+          extraTiming.mPrepareTemplateStart * 1000, null);
+    }
+    if (extraTiming.mPrepareTemplateEnd > 0) {
+      nativeSetTiming(mNativePerformanceActorPtr, TimingHandler.PREPARE_TEMPLATE_END,
+          extraTiming.mPrepareTemplateEnd * 1000, null);
     }
   }
 

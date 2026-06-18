@@ -4,7 +4,9 @@
 
 #include "core/runtime/wasmr/wasmr_host_functions.h"
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -31,6 +33,7 @@
 #include "core/renderer/css/wasm/css_token_stream_view.h"
 #include "core/renderer/css/wasm/wasm_stylesheet_parser.h"
 #include "core/renderer/utils/base/tasm_constants.h"
+#include "core/renderer/utils/value_utils.h"
 #include "core/renderer/template_assembler.h"
 #include "core/runtime/lepus/bindings/renderer.h"
 #include "core/runtime/lepus/bindings/renderer_functions.h"
@@ -38,6 +41,8 @@
 #include "core/runtime/mts_context.h"
 #include "core/runtime/wasmr/wasmr_thread_env_guard.h"
 #include "core/shell/runtime/mts/mts_runtime.h"
+#include "core/services/timing_handler/timing.h"
+#include "core/services/timing_handler/timing_constants.h"
 
 namespace lynx {
 namespace runtime {
@@ -52,6 +57,55 @@ constexpr int32_t kEventFlagBubbles = 1 << 1;
 constexpr int32_t kEventFlagCancelable = 1 << 2;
 constexpr int32_t kEventFlagComposed = 1 << 3;
 constexpr const char kStyleAttribute[] = "style";
+
+std::shared_ptr<tasm::PipelineOptions>& CurrentEngineHostPipelineOptions() {
+  static thread_local std::shared_ptr<tasm::PipelineOptions> pipeline_options;
+  return pipeline_options;
+}
+
+uint64_t RoundUpBytesToKiB(uint64_t bytes) { return (bytes + 1023) / 1024; }
+
+uint64_t GetDefaultLinearMemoryBytes(wasm_module_inst_t module_inst) {
+  wasm_memory_inst_t memory_inst =
+      wasm_runtime_get_default_memory(module_inst);
+  if (memory_inst == nullptr) {
+    return 0;
+  }
+  return wasm_memory_get_cur_page_count(memory_inst) *
+         wasm_memory_get_bytes_per_page(memory_inst);
+}
+
+void ReportWamrMemoryUsage(MTSContext* context, wasm_module_inst_t module_inst,
+                           size_t module_size,
+                           uint32_t host_managed_heap_size,
+                           bool is_shutdown) {
+  if (context == nullptr) {
+    return;
+  }
+
+  const uint64_t linear_memory_bytes =
+      is_shutdown || module_inst == nullptr
+          ? 0
+          : GetDefaultLinearMemoryBytes(module_inst);
+  const uint64_t host_managed_heap_bytes =
+      is_shutdown ? 0 : host_managed_heap_size;
+  const uint64_t size_bytes =
+      linear_memory_bytes + host_managed_heap_bytes;
+
+  std::string mem_info = "{\"gc_info\":[{\"heapsize_after\":";
+  mem_info += std::to_string(RoundUpBytesToKiB(size_bytes));
+  mem_info += ",\"engine\":\"wamr\"";
+  mem_info += ",\"linear_memory_bytes\":\"" +
+              std::to_string(linear_memory_bytes) + "\"";
+  mem_info += ",\"host_managed_heap_bytes\":\"" +
+              std::to_string(host_managed_heap_bytes) + "\"";
+  mem_info += ",\"module_binary_bytes\":\"" +
+              std::to_string(static_cast<uint64_t>(module_size)) + "\"";
+  mem_info += ",\"state\":\"";
+  mem_info += is_shutdown ? "shutdown" : "active";
+  mem_info += "\"}]}";
+  context->OnContextGC(std::move(mem_info));
+}
 
 struct WasmI32 {};
 struct WasmI64 {};
@@ -71,8 +125,13 @@ using EventRef = fml::RefPtr<event::Event>;
 struct WasmModuleTimerState {
   WasmModuleTimerState(wasm_module_t module,
                        wasm_module_inst_t module_inst,
-                       MTSContext* context)
-      : module(module), module_inst(module_inst), context(context) {}
+                       MTSContext* context, size_t module_size,
+                       uint32_t host_managed_heap_size)
+      : module(module),
+        module_inst(module_inst),
+        context(context),
+        module_size(module_size),
+        host_managed_heap_size(host_managed_heap_size) {}
 
   WasmModuleTimerState(const WasmModuleTimerState&) = delete;
   WasmModuleTimerState& operator=(const WasmModuleTimerState&) = delete;
@@ -91,6 +150,8 @@ struct WasmModuleTimerState {
     timers.clear();
     element_refs.clear();
     event_refs.clear();
+    ReportWamrMemoryUsage(context, module_inst, module_size,
+                          host_managed_heap_size, true);
     if (module_inst != nullptr) {
       wasm_runtime_deinstantiate(module_inst);
       module_inst = nullptr;
@@ -105,9 +166,13 @@ struct WasmModuleTimerState {
   wasm_module_t module = nullptr;
   wasm_module_inst_t module_inst = nullptr;
   MTSContext* context = nullptr;
+  size_t module_size = 0;
+  uint32_t host_managed_heap_size = 0;
   bool is_shutdown = false;
   bool entry_finished = false;
   bool cleanup_scheduled = false;
+  std::atomic_bool host_call_started{false};
+  std::atomic<uint32_t> host_function_count{0};
   int32_t next_element_ref = 0;
   int32_t next_event_ref = 0;
   uint32_t event_listener_count = 0;
@@ -196,6 +261,61 @@ std::shared_ptr<WasmModuleTimerState> GetWasmModuleState(
   }
   return state;
 }
+
+class WamrFrameworkTimingScope {
+ public:
+  WamrFrameworkTimingScope(const char* start_key, const char* end_key)
+      : end_key_(end_key) {
+    tasm::TimingCollector::Instance()->MarkFrameworkTiming(start_key);
+  }
+
+  ~WamrFrameworkTimingScope() {
+    tasm::TimingCollector::Instance()->MarkFrameworkTiming(end_key_);
+  }
+
+  WamrFrameworkTimingScope(const WamrFrameworkTimingScope&) = delete;
+  WamrFrameworkTimingScope& operator=(const WamrFrameworkTimingScope&) =
+      delete;
+
+ private:
+  const char* end_key_;
+};
+
+class WamrHostFunctionTimingScope {
+ public:
+  explicit WamrHostFunctionTimingScope(wasm_exec_env_t exec_env) {
+    auto* module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (module_inst == nullptr) {
+      return;
+    }
+    state_ = GetWasmModuleTimerState(module_inst);
+    if (!state_) {
+      return;
+    }
+    state_->host_function_count.fetch_add(1, std::memory_order_relaxed);
+    bool expected = false;
+    if (state_->host_call_started.compare_exchange_strong(
+            expected, true, std::memory_order_relaxed)) {
+      tasm::TimingCollector::Instance()->MarkFrameworkTiming(
+          tasm::timing::kWamrHostCallStart);
+    }
+  }
+
+  ~WamrHostFunctionTimingScope() {
+    if (!state_) {
+      return;
+    }
+    tasm::TimingCollector::Instance()->MarkFrameworkTiming(
+        tasm::timing::kWamrHostCallEnd);
+  }
+
+  WamrHostFunctionTimingScope(const WamrHostFunctionTimingScope&) = delete;
+  WamrHostFunctionTimingScope& operator=(const WamrHostFunctionTimingScope&) =
+      delete;
+
+ private:
+  std::shared_ptr<WasmModuleTimerState> state_;
+};
 
 int32_t AllocateArenaId(int32_t* next_id, const char* arena_name,
                         wasm_exec_env_t exec_env, const char* function_name) {
@@ -391,6 +511,9 @@ void InvokeWasmTimerCallback(
         wasm_runtime_get_exception(state->module_inst));
   }
   wasm_runtime_destroy_exec_env(callback_env);
+  ReportWamrMemoryUsage(state->context, state->module_inst,
+                        state->module_size, state->host_managed_heap_size,
+                        false);
 }
 
 void InvokeWasmEventCallback(
@@ -431,6 +554,9 @@ void InvokeWasmEventCallback(
     }
   }
   wasm_runtime_destroy_exec_env(callback_env);
+  ReportWamrMemoryUsage(state->context, state->module_inst,
+                        state->module_size, state->host_managed_heap_size,
+                        false);
 }
 
 std::unique_ptr<base::TimedTaskManager>& EnsureTimerManager(
@@ -527,6 +653,7 @@ uint32_t DecodeTimerId(uint64_t raw_timer_id) {
 }
 
 void SetTimeoutHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   const uint32_t callback_index = static_cast<uint32_t>(raw_args[0]);
   const int64_t delay_ms = static_cast<int64_t>(raw_args[1]);
   raw_args[0] = ScheduleWasmTimer(exec_env, callback_index, delay_ms, false,
@@ -534,6 +661,7 @@ void SetTimeoutHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 }
 
 void SetIntervalHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   const uint32_t callback_index = static_cast<uint32_t>(raw_args[0]);
   const int64_t delay_ms = static_cast<int64_t>(raw_args[1]);
   raw_args[0] = ScheduleWasmTimer(exec_env, callback_index, delay_ms, true,
@@ -541,10 +669,12 @@ void SetIntervalHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 }
 
 void ClearTimeoutHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   ClearWasmTimer(exec_env, DecodeTimerId(raw_args[0]), tasm::kClearTimeout);
 }
 
 void ClearIntervalHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   ClearWasmTimer(exec_env, DecodeTimerId(raw_args[0]),
                  tasm::kClearTimeInterval);
 }
@@ -842,6 +972,7 @@ void InvokeEngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args,
 #define BINDING(id, symbol, function, return_tag, ...)                     \
   constexpr const char* id##Symbol = symbol;                               \
   void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {    \
+    WamrHostFunctionTimingScope host_timing_scope(exec_env);               \
     InvokeEngineHostFunction<return_tag, HiddenCreateNone, __VA_ARGS__>(   \
         exec_env, raw_args, &tasm::RendererFunctions::function,            \
         id##Symbol);                                                       \
@@ -851,6 +982,7 @@ void InvokeEngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args,
                                  hidden_create_tag, ...)                 \
   constexpr const char* id##Symbol = symbol;                             \
   void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {  \
+    WamrHostFunctionTimingScope host_timing_scope(exec_env);             \
     InvokeEngineHostFunction<return_tag, hidden_create_tag, __VA_ARGS__>( \
         exec_env, raw_args, &tasm::RendererFunctions::function,          \
         id##Symbol);                                                     \
@@ -859,6 +991,7 @@ void InvokeEngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args,
 #define BINDING0(id, symbol, function, return_tag)                         \
   constexpr const char* id##Symbol = symbol;                               \
   void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {    \
+    WamrHostFunctionTimingScope host_timing_scope(exec_env);               \
     InvokeEngineHostFunction<return_tag, HiddenCreateNone>(                \
         exec_env, raw_args, &tasm::RendererFunctions::function,            \
         id##Symbol);                                                       \
@@ -868,6 +1001,7 @@ void InvokeEngineHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args,
                                   hidden_create_tag)                      \
   constexpr const char* id##Symbol = symbol;                              \
   void id##HostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {   \
+    WamrHostFunctionTimingScope host_timing_scope(exec_env);              \
     InvokeEngineHostFunction<return_tag, hidden_create_tag>(              \
         exec_env, raw_args, &tasm::RendererFunctions::function,           \
         id##Symbol);                                                      \
@@ -950,11 +1084,13 @@ constexpr const char kGetEventCurrentTargetUniqueIDSymbol[] =
     "__GetEventCurrentTargetUniqueID";
 
 void DropElementHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   DropElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
                  kDropElementBindingSymbol);
 }
 
 void DropEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   DropEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
                kDropEventBindingSymbol);
 }
@@ -1142,6 +1278,7 @@ int32_t WriteStringArray(wasm_exec_env_t exec_env,
 
 void InsertElementBeforeHostFunction(wasm_exec_env_t exec_env,
                                      uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionInsertElementBefore;
   bool ok = true;
   auto parent = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1163,6 +1300,7 @@ void InsertElementBeforeHostFunction(wasm_exec_env_t exec_env,
 }
 
 void GetChildrenHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionGetChildren;
   bool ok = true;
   auto parent = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1183,6 +1321,7 @@ void GetChildrenHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 
 void SetStringAttributeHostFunction(wasm_exec_env_t exec_env,
                                     uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = kSetStringAttributeSymbol;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1210,6 +1349,7 @@ void SetStringAttributeHostFunction(wasm_exec_env_t exec_env,
 }
 
 void RemoveAttributeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = kRemoveAttributeSymbol;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1264,6 +1404,9 @@ void ApplyStyleSheetTokensHostFunction(wasm_exec_env_t exec_env,
                                        uint64_t* raw_args,
                                        const char* function_name,
                                        bool replace) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
+  WamrFrameworkTimingScope css_timing_scope(
+      tasm::timing::kWamrCssApplyStart, tasm::timing::kWamrCssApplyEnd);
   auto* tasm = GetTemplateAssembler(exec_env, function_name);
   if (!tasm || !tasm->page_proxy()) {
     return;
@@ -1324,6 +1467,7 @@ void ReplaceStyleSheetsTokensHostFunction(wasm_exec_env_t exec_env,
 }
 
 void SetIDHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionSetID;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1347,6 +1491,10 @@ void SetIDHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 
 void FlushElementTreeHostFunction(wasm_exec_env_t exec_env,
                                   uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
+  WamrFrameworkTimingScope flush_timing_scope(
+      tasm::timing::kWamrFlushElementTreeStart,
+      tasm::timing::kWamrFlushElementTreeEnd);
   constexpr const char* kFunction = tasm::kCFunctionFlushElementTree;
   auto* context = GetEngineHostContext(exec_env);
   if (context == nullptr) {
@@ -1364,6 +1512,17 @@ void FlushElementTreeHostFunction(wasm_exec_env_t exec_env,
     }
     args.emplace_back(root);
   }
+  auto pipeline_options = CurrentEngineHostPipelineOptions();
+  if (pipeline_options != nullptr) {
+    if (args.empty()) {
+      args.emplace_back(lepus::Value());
+    }
+    lepus::Value options(lepus::Dictionary::Create());
+    BASE_STATIC_STRING_DECL(kPipelineOptions, "pipelineOptions");
+    options.SetProperty(kPipelineOptions,
+                        tasm::PipelineOptionsToLepusValue(pipeline_options));
+    args.emplace_back(std::move(options));
+  }
   tasm::RendererFunctions::FiberFlushElementTree(
       context, args.empty() ? nullptr : args.data(),
       static_cast<int>(args.size()));
@@ -1371,6 +1530,7 @@ void FlushElementTreeHostFunction(wasm_exec_env_t exec_env,
 
 void ReplaceElementsHostFunction(wasm_exec_env_t exec_env,
                                  uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionReplaceElements;
   bool ok = true;
   auto parent = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1403,6 +1563,7 @@ tasm::NodeSelectOptions MakeCssSelectorOptions(std::string selector,
 }
 
 void QuerySelectorHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionQuerySelector;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1427,6 +1588,7 @@ void QuerySelectorHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 
 void QuerySelectorAllHostFunction(wasm_exec_env_t exec_env,
                                   uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionQuerySelectorAll;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1453,6 +1615,7 @@ void QuerySelectorAllHostFunction(wasm_exec_env_t exec_env,
 }
 
 void GetClassesHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionGetClasses;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1474,6 +1637,7 @@ void GetClassesHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 
 void GetAttributeNamesHostFunction(wasm_exec_env_t exec_env,
                                    uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionGetAttributeNames;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1501,6 +1665,7 @@ void GetAttributeNamesHostFunction(wasm_exec_env_t exec_env,
 
 void GetStringAttributeByNameHostFunction(wasm_exec_env_t exec_env,
                                           uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = kGetStringAttributeByNameSymbol;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1565,6 +1730,7 @@ class WasmEventListener : public event::EventListener {
 
 void AddEventListenerHostFunction(wasm_exec_env_t exec_env,
                                   uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionAddEventListener;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1592,6 +1758,7 @@ void AddEventListenerHostFunction(wasm_exec_env_t exec_env,
 
 void RemoveEventListenerHostFunction(wasm_exec_env_t exec_env,
                                      uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionFiberRemoveEventListener;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1616,6 +1783,7 @@ void RemoveEventListenerHostFunction(wasm_exec_env_t exec_env,
 }
 
 void CreateEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionCreateEvent;
   bool ok = true;
   int32_t type = static_cast<int32_t>(raw_args[0]);
@@ -1648,6 +1816,7 @@ void CreateEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 }
 
 void DispatchEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionDispatchEvent;
   bool ok = true;
   auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1666,6 +1835,7 @@ void DispatchEventHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 
 void StopPropagationHostFunction(wasm_exec_env_t exec_env,
                                  uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionStopPropagation;
   bool ok = true;
   auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1677,6 +1847,7 @@ void StopPropagationHostFunction(wasm_exec_env_t exec_env,
 
 void StopImmediatePropagationHostFunction(wasm_exec_env_t exec_env,
                                           uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   constexpr const char* kFunction = tasm::kCFunctionStopImmediatePropagation;
   bool ok = true;
   auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
@@ -1687,6 +1858,7 @@ void StopImmediatePropagationHostFunction(wasm_exec_env_t exec_env,
 }
 
 void GetEventTypeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   bool ok = true;
   auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
                            kGetEventTypeSymbol, &ok);
@@ -1701,6 +1873,7 @@ void GetEventTypeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
 
 void GetEventCurrentTargetUniqueIDHostFunction(wasm_exec_env_t exec_env,
                                                uint64_t* raw_args) {
+  WamrHostFunctionTimingScope host_timing_scope(exec_env);
   bool ok = true;
   auto event = GetEventRef(exec_env, static_cast<int32_t>(raw_args[0]),
                            kGetEventCurrentTargetUniqueIDSymbol, &ok);
@@ -1852,9 +2025,10 @@ bool RegisterEngineHostFunctions() {
 
 void RegisterEngineHostModule(wasm_module_t module,
                               wasm_module_inst_t module_inst,
-                              MTSContext* context) {
-  auto state = std::make_shared<WasmModuleTimerState>(module, module_inst,
-                                                      context);
+                              MTSContext* context, size_t module_size,
+                              uint32_t host_managed_heap_size) {
+  auto state = std::make_shared<WasmModuleTimerState>(
+      module, module_inst, context, module_size, host_managed_heap_size);
   std::lock_guard<std::mutex> lock(WasmModuleTimerStatesMutex());
   auto& states = WasmModuleTimerStates();
   auto old_state = states.find(module_inst);
@@ -1870,6 +2044,11 @@ void FinishEngineHostModule(wasm_module_inst_t module_inst) {
     return;
   }
   state->entry_finished = true;
+  LOGI("WAMR host function count: "
+       << state->host_function_count.load(std::memory_order_relaxed));
+  ReportWamrMemoryUsage(state->context, state->module_inst,
+                        state->module_size, state->host_managed_heap_size,
+                        false);
   MaybeEraseFinishedWasmModuleTimerState(state);
 }
 
@@ -1923,6 +2102,11 @@ MTSContext* GetEngineHostContext(wasm_exec_env_t exec_env) {
   }
   return static_cast<MTSContext*>(
       wasm_runtime_get_custom_data(wasm_runtime_get_module_inst(exec_env)));
+}
+
+void SetEngineHostPipelineOptions(
+    std::shared_ptr<tasm::PipelineOptions> pipeline_options) {
+  CurrentEngineHostPipelineOptions() = std::move(pipeline_options);
 }
 
 }  // namespace wasmr

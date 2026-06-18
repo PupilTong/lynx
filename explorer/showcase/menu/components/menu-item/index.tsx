@@ -25,7 +25,8 @@ export function MenuItem(props: ItemProps) {
   const { resolved, withTheme } = useTheme();
 
   const openCard = (url: string) => {
-    openSchema(`${url}?${withQuery(props, resolved)}`);
+    const separator = url.includes('?') ? '&' : '?';
+    openSchema(`${url}${separator}${withQuery(props, resolved)}`);
   };
 
   const onClick = (item) => {

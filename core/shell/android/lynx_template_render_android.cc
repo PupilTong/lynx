@@ -125,6 +125,8 @@ std::shared_ptr<lynx::tasm::PipelineOptions> ProcessLoadTemplateTimingOption(
           .StdString();
   auto timingStampMap = timing_option.GetProperty(
       BASE_STATIC_STRING(lynx::tasm::timing::kTimestampMap));
+  auto initTimingStampMap = timing_option.GetProperty(
+      BASE_STATIC_STRING(lynx::tasm::timing::kInitTimestampMap));
 
   uint64_t pipeline_start_timestamp = static_cast<uint64_t>(
       timingStampMap
@@ -141,6 +143,17 @@ std::shared_ptr<lynx::tasm::PipelineOptions> ProcessLoadTemplateTimingOption(
       options & lynx::tasm::PipelineOptions::kDumpElement;
   reinterpret_cast<LynxShell*>(ptr)->OnPipelineStart(
       pipeline_options->pipeline_id, pipeline_origin, pipeline_start_timestamp);
+
+  if (initTimingStampMap.IsTable()) {
+    lynx::tasm::ForEachLepusValue(
+        initTimingStampMap,
+        [&ptr](const lynx::lepus::Value& timingKey,
+               const lynx::lepus::Value& timingStamp) {
+          reinterpret_cast<LynxShell*>(ptr)->SetTiming(
+              static_cast<uint64_t>(timingStamp.Int64()), timingKey.StdString(),
+              "");
+        });
+  }
 
   // mark all timing
   lynx::tasm::ForEachLepusValue(

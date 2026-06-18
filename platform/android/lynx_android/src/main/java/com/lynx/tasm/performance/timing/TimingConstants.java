@@ -27,4 +27,5 @@ public class TimingConstants {
   // Performance API Key
   public static final String PIPELINE_ORIGIN = "pipelineOrigin";
   public static final String TIMESTAMP_MAP = "timestampMap";
+  public static final String INIT_TIMESTAMP_MAP = "initTimestampMap";
 }

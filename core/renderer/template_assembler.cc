@@ -1063,6 +1063,10 @@ void TemplateAssembler::LoadTemplateInternal(
     if (pipeline_options->need_timestamps) {
       tasm::TimingCollector::Instance()->Mark(tasm::timing::kMtsRenderStart);
     }
+    if (is_wasm_context) {
+      pipeline_options->is_first_screen = true;
+      card->GetVm()->SetWasmPipelineOptions(pipeline_options);
+    }
     OnVMExecute();
 
     // Get VM & exec VM.
@@ -1106,9 +1110,6 @@ void TemplateAssembler::LoadTemplateInternal(
 
     // render template
     if (is_wasm_context) {
-      tasm::TimingCollector::Instance()->Mark(tasm::timing::kCreateVdomStart);
-      pipeline_options->is_first_screen = true;
-      tasm::TimingCollector::Instance()->Mark(tasm::timing::kCreateVdomEnd);
       tasm::TimingCollector::Instance()->Mark(tasm::timing::kMtsRenderEnd);
       if (pipeline_options->enable_unified_pixel_pipeline) {
         this->GetCurrentPipelineContext()->RequestResolve();

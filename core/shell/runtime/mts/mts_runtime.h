@@ -33,6 +33,7 @@ namespace lynx {
 namespace tasm {
 class AnimationFrameManager;
 class LepusCallbackManager;
+struct PipelineOptions;
 }  // namespace tasm
 
 namespace lepus {
@@ -118,6 +119,8 @@ class MTSRuntime : private MTSContextHolder {
   bool Execute(const ContextBundle* bundle);
 
   void SetWasmModule(std::vector<uint8_t> module, std::string url);
+  void SetWasmPipelineOptions(
+      std::shared_ptr<tasm::PipelineOptions> pipeline_options);
 
   // only for main bundle
   bool TryExecute();
@@ -327,6 +330,7 @@ class MTSRuntime : private MTSContextHolder {
   std::string name_;
   std::vector<uint8_t> wasm_module_;
   std::string wasm_module_url_;
+  std::shared_ptr<tasm::PipelineOptions> wasm_pipeline_options_;
 
   std::string sdk_version_{"null"};
 

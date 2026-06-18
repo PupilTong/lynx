@@ -6,6 +6,7 @@ package com.lynx.tasm.performance.timing;
 
 import androidx.annotation.RestrictTo;
 import com.lynx.react.bridge.JavaOnlyMap;
+import com.lynx.tasm.TimingHandler;
 import com.lynx.tasm.performance.IPerformanceObserver;
 import com.lynx.tasm.performance.performanceobserver.PerformanceEntry;
 import com.lynx.tasm.performance.performanceobserver.PerformanceEntryConverter;
@@ -14,12 +15,17 @@ import java.util.ArrayList;
 
 /**
  * @brief Embedded timing collector that provides minimal timing tracking
- * for embedded mode, tracking only the essential timing points (loadBundleStart,
- * loadBundleEnd, DrawEnd).
+ * for embedded mode, tracking essential load/update and optional extra timing
+ * points.
  */
 @RestrictTo(RestrictTo.Scope.LIBRARY)
 public class EmbeddedTimingCollector {
   private long mLoadBundleStartUs;
+  private long mOpenTimeUs;
+  private long mContainerInitStartUs;
+  private long mContainerInitEndUs;
+  private long mPrepareTemplateStartUs;
+  private long mPrepareTemplateEndUs;
   private final ArrayList<Long> mUpdateDataStartUsList = new ArrayList<>();
   private long mPaintEndUs;
   private boolean mHasEmitLoadBundleEvent = false;
@@ -41,6 +47,27 @@ public class EmbeddedTimingCollector {
     return !mUpdateDataStartUsList.isEmpty();
   }
 
+  public void setExtraTiming(TimingHandler.ExtraTimingInfo extraTiming) {
+    if (extraTiming == null) {
+      return;
+    }
+    if (extraTiming.mOpenTime > 0) {
+      mOpenTimeUs = millisToMicros(extraTiming.mOpenTime);
+    }
+    if (extraTiming.mContainerInitStart > 0) {
+      mContainerInitStartUs = millisToMicros(extraTiming.mContainerInitStart);
+    }
+    if (extraTiming.mContainerInitEnd > 0) {
+      mContainerInitEndUs = millisToMicros(extraTiming.mContainerInitEnd);
+    }
+    if (extraTiming.mPrepareTemplateStart > 0) {
+      mPrepareTemplateStartUs = millisToMicros(extraTiming.mPrepareTemplateStart);
+    }
+    if (extraTiming.mPrepareTemplateEnd > 0) {
+      mPrepareTemplateEndUs = millisToMicros(extraTiming.mPrepareTemplateEnd);
+    }
+  }
+
   public void markTiming(String key, long usTimestamp) {
     // Only track the essential timing points for embedded mode
     switch (key) {
@@ -54,6 +81,21 @@ public class EmbeddedTimingCollector {
         mPaintEndUs = usTimestamp;
         emitLoadBundleIfReady();
         emitUpdateDataIfReady();
+        break;
+      case TimingHandler.OPEN_TIME:
+        mOpenTimeUs = usTimestamp;
+        break;
+      case TimingHandler.CONTAINER_INIT_START:
+        mContainerInitStartUs = usTimestamp;
+        break;
+      case TimingHandler.CONTAINER_INIT_END:
+        mContainerInitEndUs = usTimestamp;
+        break;
+      case TimingHandler.PREPARE_TEMPLATE_START:
+        mPrepareTemplateStartUs = usTimestamp;
+        break;
+      case TimingHandler.PREPARE_TEMPLATE_END:
+        mPrepareTemplateEndUs = usTimestamp;
         break;
       default:
         // Ignore other timing points in embedded mode
@@ -82,6 +124,17 @@ public class EmbeddedTimingCollector {
     entryMap.put("name", TimingConstants.LOAD_BUNDLE);
     entryMap.put(TimingConstants.LOAD_BUNDLE_START, (double) mLoadBundleStartUs / 1000);
     entryMap.put(TimingConstants.PAINT_END, (double) mPaintEndUs / 1000);
+    putTimestampIfPresent(entryMap, TimingHandler.OPEN_TIME, mOpenTimeUs);
+    putTimestampIfPresent(entryMap, TimingHandler.CONTAINER_INIT_START, mContainerInitStartUs);
+    putTimestampIfPresent(entryMap, TimingHandler.CONTAINER_INIT_END, mContainerInitEndUs);
+    putTimestampIfPresent(entryMap, TimingHandler.PREPARE_TEMPLATE_START, mPrepareTemplateStartUs);
+    putTimestampIfPresent(entryMap, TimingHandler.PREPARE_TEMPLATE_END, mPrepareTemplateEndUs);
+    putMetricIfReady(entryMap, "lynxFcp", TimingConstants.LOAD_BUNDLE_START, mLoadBundleStartUs,
+        TimingConstants.PAINT_END, mPaintEndUs);
+    putMetricIfReady(entryMap, "fcp", TimingHandler.PREPARE_TEMPLATE_START,
+        mPrepareTemplateStartUs, TimingConstants.PAINT_END, mPaintEndUs);
+    putMetricIfReady(entryMap, "totalFcp", TimingHandler.OPEN_TIME, mOpenTimeUs,
+        TimingConstants.PAINT_END, mPaintEndUs);
 
     PerformanceEntry entry = PerformanceEntryConverter.makePerformanceEntry(entryMap);
     observer.onPerformanceEvent(entry);
@@ -108,5 +161,30 @@ public class EmbeddedTimingCollector {
       PerformanceEntry entry = PerformanceEntryConverter.makePerformanceEntry(entryMap);
       observer.onPerformanceEvent(entry);
     }
+  }
+
+  private static long millisToMicros(long msTimestamp) {
+    return msTimestamp * 1000;
+  }
+
+  private static void putTimestampIfPresent(JavaOnlyMap entryMap, String key, long usTimestamp) {
+    if (usTimestamp > 0) {
+      entryMap.put(key, (double) usTimestamp / 1000);
+    }
+  }
+
+  private static void putMetricIfReady(JavaOnlyMap entryMap, String metricName, String startName,
+      long startUs, String endName, long endUs) {
+    if (startUs <= 0 || endUs <= 0 || endUs < startUs) {
+      return;
+    }
+    JavaOnlyMap metricMap = new JavaOnlyMap();
+    metricMap.put("name", metricName);
+    metricMap.put("startTimestampName", startName);
+    metricMap.put("startTimestamp", (double) startUs / 1000);
+    metricMap.put("endTimestampName", endName);
+    metricMap.put("endTimestamp", (double) endUs / 1000);
+    metricMap.put("duration", (double) (endUs - startUs) / 1000);
+    entryMap.put(metricName, metricMap);
   }
 }

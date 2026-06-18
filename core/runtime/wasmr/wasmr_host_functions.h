@@ -5,11 +5,17 @@
 #ifndef CORE_RUNTIME_WASMR_WASMR_HOST_FUNCTIONS_H_
 #define CORE_RUNTIME_WASMR_WASMR_HOST_FUNCTIONS_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #include "wasm_export.h"
 
 namespace lynx {
+namespace tasm {
+struct PipelineOptions;
+}  // namespace tasm
+
 namespace runtime {
 
 class MTSContext;
@@ -28,7 +34,8 @@ bool RegisterEngineHostFunctions();
 // guest after the entry function returns, such as setTimeout / setInterval.
 void RegisterEngineHostModule(wasm_module_t module,
                               wasm_module_inst_t module_inst,
-                              MTSContext* context);
+                              MTSContext* context, size_t module_size,
+                              uint32_t host_managed_heap_size);
 
 // Marks the initial entry call as finished. If no async host callbacks are
 // pending, the module instance is released immediately; otherwise it is kept
@@ -46,6 +53,9 @@ void DestroyEngineHostModulesForContext(MTSContext* context);
 void SetEngineHostContext(wasm_exec_env_t exec_env, MTSContext* context);
 
 MTSContext* GetEngineHostContext(wasm_exec_env_t exec_env);
+
+void SetEngineHostPipelineOptions(
+    std::shared_ptr<tasm::PipelineOptions> pipeline_options);
 
 }  // namespace wasmr
 }  // namespace runtime

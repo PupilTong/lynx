@@ -16,12 +16,14 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Display;
 import android.view.DisplayCutout;
+import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 import androidx.core.view.WindowCompat;
@@ -35,17 +37,24 @@ import com.lynx.explorer.utils.QueryMapUtils;
 import com.lynx.tasm.LynxBooleanOption;
 import com.lynx.tasm.LynxView;
 import com.lynx.tasm.LynxViewBuilder;
+import com.lynx.tasm.LynxViewClient;
+import com.lynx.tasm.LynxViewClientV2;
 import com.lynx.tasm.TemplateData;
 import com.lynx.tasm.ThreadStrategyForRendering;
 import com.lynx.tasm.TimingHandler;
 import com.lynx.tasm.behavior.Behavior;
 import com.lynx.tasm.behavior.LynxContext;
+import com.lynx.tasm.performance.performanceobserver.LoadBundleEntry;
+import com.lynx.tasm.performance.performanceobserver.PerformanceMetric;
+import com.lynx.tasm.performance.performanceobserver.PerformanceEntry;
+import com.lynx.tasm.performance.performanceobserver.PipelineEntry;
 import com.lynx.tasm.utils.DisplayMetricsHolder;
 import com.lynx.xelement.XElementBehaviors;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 public class LynxViewShellActivity extends AppCompatActivity {
@@ -58,9 +67,17 @@ public class LynxViewShellActivity extends AppCompatActivity {
   private static final String DEFAULT_TOP_BAR_COLOR = "#F0F2F5";
   private static final String DEFAULT_TOP_BAR_TITLE_COLOR = "#000000";
   private static final String DEFAULT_TOP_BAR_BACK_BUTTON_STYLE = "light";
+  private static final String PERF_OVERLAY_PARAM = "perf_overlay";
+  private static final String PERF_LABEL_PARAM = "perf_label";
   private ViewGroup mLynxContainer;
   private LynxView mLynxView;
   private String mFrontendTheme;
+  private TextView mPerfOverlay;
+  private boolean mPerfOverlayEnabled;
+  private String mPerfLabel = "Lynx";
+  private String mPendingPerfText;
+  private String mPerfTimingText;
+  private boolean mHasPerformanceEntryTiming;
   private TimingHandler.ExtraTimingInfo extraTimingInfo = new TimingHandler.ExtraTimingInfo();
 
   @Override
@@ -274,7 +291,9 @@ public class LynxViewShellActivity extends AppCompatActivity {
       }
     }
 
+    configurePerformanceOverlay(queryMap);
     LynxView lynxView = builder.build(this);
+    installPerformanceClientIfNeeded(lynxView);
     lynxView.updateGlobalProps(getGlobalProps(this, queryMap));
     extraTimingInfo.mPrepareTemplateStart = System.currentTimeMillis();
 
@@ -283,6 +302,292 @@ public class LynxViewShellActivity extends AppCompatActivity {
         new FrameLayout.LayoutParams(queryMap.getInt("width", ViewGroup.LayoutParams.MATCH_PARENT),
             queryMap.getInt("height", ViewGroup.LayoutParams.MATCH_PARENT)));
     mLynxView = lynxView;
+    ensurePerformanceOverlay();
+  }
+
+  private void configurePerformanceOverlay(QueryMapUtils queryMap) {
+    mPerfOverlayEnabled = queryMap.getBoolean(PERF_OVERLAY_PARAM, false);
+    if (queryMap.contains(PERF_LABEL_PARAM)) {
+      mPerfLabel = queryMap.getString(PERF_LABEL_PARAM);
+    }
+    if (mPerfOverlayEnabled) {
+      mPerfTimingText = "waiting for lynx_fcp...";
+      mPendingPerfText = composePerformanceOverlayText();
+    }
+  }
+
+  private void installPerformanceClientIfNeeded(LynxView lynxView) {
+    if (!mPerfOverlayEnabled) {
+      return;
+    }
+    lynxView.addLynxViewClient(new LynxViewClient() {
+      @Override
+      public void onTimingSetup(Map<String, Object> timingInfo) {
+        if (!mHasPerformanceEntryTiming) {
+          updatePerformanceTiming(formatSetupPerformance(timingInfo));
+        }
+      }
+    });
+    lynxView.addLynxViewClientV2(new LynxViewClientV2() {
+      @Override
+      public void onPerformanceEvent(@NonNull PerformanceEntry entry) {
+        if (entry instanceof LoadBundleEntry) {
+          mHasPerformanceEntryTiming = true;
+          updatePerformanceTiming(formatLoadBundlePerformance((LoadBundleEntry) entry));
+        } else if (!mHasPerformanceEntryTiming && entry instanceof PipelineEntry) {
+          updatePerformanceTiming(formatPipelinePerformance(entry.name, (PipelineEntry) entry));
+        }
+      }
+    });
+  }
+
+  private void ensurePerformanceOverlay() {
+    if (!mPerfOverlayEnabled || mLynxContainer == null) {
+      return;
+    }
+    if (mPerfOverlay != null) {
+      mPerfOverlay.bringToFront();
+      return;
+    }
+    TextView overlay = new TextView(this);
+    overlay.setTextColor(Color.WHITE);
+    overlay.setTextSize(11);
+    overlay.setGravity(Gravity.START);
+    overlay.setPadding(18, 12, 18, 12);
+    overlay.setBackgroundColor(Color.argb(210, 0, 0, 0));
+    overlay.setText(mPendingPerfText == null ? "Perf: " + mPerfLabel : mPendingPerfText);
+    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
+    mLynxContainer.addView(overlay, params);
+    mPerfOverlay = overlay;
+  }
+
+  private void updatePerformanceTiming(String text) {
+    mPerfTimingText = text;
+    String overlayText = composePerformanceOverlayText();
+    Log.i(TAG, "PerfOverlay " + overlayText.replace('\n', '|'));
+    updatePerformanceOverlay(overlayText);
+  }
+
+  private void updatePerformanceOverlay(String text) {
+    mPendingPerfText = text;
+    runOnUiThread(() -> {
+      ensurePerformanceOverlay();
+      if (mPerfOverlay != null) {
+        mPerfOverlay.setText(mPendingPerfText);
+      }
+    });
+  }
+
+  private String composePerformanceOverlayText() {
+    StringBuilder builder = new StringBuilder();
+    builder.append("Perf: ").append(mPerfLabel).append('\n');
+    if (mPerfTimingText != null) {
+      builder.append(mPerfTimingText);
+      if (mPerfTimingText.length() > 0
+          && mPerfTimingText.charAt(mPerfTimingText.length() - 1) != '\n') {
+        builder.append('\n');
+      }
+    }
+    return builder.toString();
+  }
+
+  private String formatSetupPerformance(Map<String, Object> timingInfo) {
+    Map<String, Object> setupTiming = getNestedMap(timingInfo, "setup_timing");
+    Map<String, Object> metrics = getNestedMap(timingInfo, "metrics");
+    StringBuilder builder = new StringBuilder();
+    Double execute = duration(setupTiming, "lepus_excute_start", "lepus_excute_end");
+    Double lynxFcp = firstNonNull(metric(metrics, "lynx_fcp"), metric(metrics, "lynxFcp"));
+    Double loadTemplate = duration(setupTiming, "load_template_start", "load_template_end");
+    Double afterLoadToFlush =
+        signedDuration(setupTiming, "load_template_end", "ui_operation_flush_end");
+    Double paintWait = subtract(subtract(lynxFcp, loadTemplate), afterLoadToFlush);
+    appendLynxFcpHeader(builder, lynxFcp, loadTemplate, afterLoadToFlush, paintWait);
+    builder.append("diagnostics\n");
+    appendMetric(builder, 2, "render_cpu",
+        firstNonNull(duration(setupTiming, "mtsRenderStart", "mtsRenderEnd"), execute));
+    builder.append("  pipeline\n");
+    appendMetric(builder, 4, "layout", duration(setupTiming, "layout_start", "layout_end"));
+    appendMetric(builder, 4, "ui_flush", duration(setupTiming, "ui_operation_flush_start",
+                     "ui_operation_flush_end"));
+    return builder.toString();
+  }
+
+  private String formatLoadBundlePerformance(LoadBundleEntry entry) {
+    StringBuilder builder = new StringBuilder();
+    Double execute = duration(entry.rawMap, "vmExecuteStart", "vmExecuteEnd");
+    Double lynxFcp = metricDuration(entry.lynxFcp);
+    Double loadTemplate = duration(entry.loadBundleStart, entry.loadBundleEnd);
+    Double afterLoadToFlush =
+        signedDuration(entry.loadBundleEnd, entry.layoutUiOperationExecuteEnd);
+    Double paintWait = duration(entry.layoutUiOperationExecuteEnd, entry.paintEnd);
+    appendLynxFcpHeader(builder, lynxFcp, loadTemplate, afterLoadToFlush, paintWait);
+    builder.append("diagnostics\n");
+    appendMetric(builder, 2, "render_cpu",
+        firstNonNull(duration(entry.mtsRenderStart, entry.mtsRenderEnd), execute));
+    appendWamrMetrics(builder, entry.frameworkRenderingTiming);
+    builder.append("  pipeline\n");
+    appendMetric(builder, 4, "layout", duration(entry.layoutStart, entry.layoutEnd));
+    appendMetric(builder, 4, "ui_flush",
+        duration(entry.paintingUiOperationExecuteStart, entry.layoutUiOperationExecuteEnd));
+    return builder.toString();
+  }
+
+  private String formatPipelinePerformance(String name, PipelineEntry entry) {
+    StringBuilder builder = new StringBuilder();
+    builder.append(name == null || name.isEmpty() ? "pipeline" : name).append('\n');
+    appendPipelineMetrics(builder, entry);
+    return builder.toString();
+  }
+
+  private void appendPipelineMetrics(StringBuilder builder, PipelineEntry entry) {
+    appendPipelineMetrics(builder, entry, null);
+  }
+
+  private void appendPipelineMetrics(
+      StringBuilder builder, PipelineEntry entry, Double renderCpuFallback) {
+    appendMetric(builder, "render_cpu",
+        firstNonNull(duration(entry.mtsRenderStart, entry.mtsRenderEnd), renderCpuFallback));
+    appendMetric(builder, "layout", duration(entry.layoutStart, entry.layoutEnd));
+    appendMetric(builder, "ui_flush",
+        duration(entry.paintingUiOperationExecuteStart, entry.layoutUiOperationExecuteEnd));
+    appendMetric(
+        builder, "paint_wait", duration(entry.layoutUiOperationExecuteEnd, entry.paintEnd));
+    appendWamrMetrics(builder, entry.frameworkRenderingTiming);
+  }
+
+  private void appendWamrMetrics(StringBuilder builder, Map<String, Object> timing) {
+    if (!hasAnyKey(timing, "wamrLoadStart", "wamrEntryStart")) {
+      return;
+    }
+    builder.append("  wamr\n");
+    appendMetric(builder, 4, "load", duration(timing, "wamrLoadStart", "wamrLoadEnd"));
+    appendMetric(builder, 4, "entry", duration(timing, "wamrEntryStart", "wamrEntryEnd"));
+  }
+
+  private boolean hasAnyKey(Map<String, Object> timing, String... keys) {
+    for (String key : keys) {
+      if (timing.containsKey(key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void appendLynxFcpHeader(StringBuilder builder, Double lynxFcp, Double loadTemplate,
+      Double afterLoadToFlush, Double paintWait) {
+    builder.append("lynx_fcp\n");
+    appendMetric(builder, "lynx_fcp", lynxFcp);
+    builder.append("  range: loadBundleStart -> paintEnd\n");
+    builder.append("  components\n");
+    appendMetric(builder, 4, "load_template", loadTemplate);
+    appendMetric(builder, 4, "after_load_to_flush", afterLoadToFlush);
+    appendMetric(builder, 4, "paint_wait", paintWait);
+    appendMetric(builder, 4, "sum", sum(loadTemplate, afterLoadToFlush, paintWait));
+  }
+
+  private Map<String, Object> getNestedMap(Map<String, Object> map, String key) {
+    if (map == null) {
+      return new HashMap<>();
+    }
+    Object value = map.get(key);
+    if (!(value instanceof Map)) {
+      return new HashMap<>();
+    }
+    return (Map<String, Object>) value;
+  }
+
+  private Double duration(Map<String, Object> timing, String startKey, String endKey) {
+    Double start = numberValue(timing.get(startKey));
+    Double end = numberValue(timing.get(endKey));
+    if (start == null || end == null || end < start) {
+      return null;
+    }
+    return end - start;
+  }
+
+  private Double signedDuration(Map<String, Object> timing, String startKey, String endKey) {
+    Double start = numberValue(timing.get(startKey));
+    Double end = numberValue(timing.get(endKey));
+    if (start == null || end == null) {
+      return null;
+    }
+    return signedDuration(start, end);
+  }
+
+  private Double signedDuration(double start, double end) {
+    if (start < 0 || end < 0) {
+      return null;
+    }
+    return end - start;
+  }
+
+  private Double duration(double start, double end) {
+    if (start < 0 || end < 0 || end < start) {
+      return null;
+    }
+    return end - start;
+  }
+
+  private Double metric(Map<String, Object> metrics, String key) {
+    return numberValue(metrics.get(key));
+  }
+
+  private Double metricDuration(PerformanceMetric metric) {
+    if (metric == null || metric.duration < 0) {
+      return null;
+    }
+    return metric.duration;
+  }
+
+  private Double firstNonNull(Double value, Double fallback) {
+    return value != null ? value : fallback;
+  }
+
+  private Double numberValue(Object value) {
+    if (value instanceof Number) {
+      return ((Number) value).doubleValue();
+    }
+    return null;
+  }
+
+  private Double subtract(Double left, Double right) {
+    if (left == null || right == null) {
+      return null;
+    }
+    return left - right;
+  }
+
+  private Double sum(Double... values) {
+    double total = 0;
+    for (Double value : values) {
+      if (value == null) {
+        return null;
+      }
+      total += value;
+    }
+    return total;
+  }
+
+  private void appendMetric(StringBuilder builder, String name, Double value) {
+    appendMetric(builder, 0, name, value);
+  }
+
+  private void appendMetric(StringBuilder builder, int indent, String name, Double value) {
+    appendIndent(builder, indent);
+    builder.append(name).append(": ");
+    if (value == null) {
+      builder.append("--");
+    } else {
+      builder.append(String.format(Locale.US, "%.2f ms", value));
+    }
+    builder.append('\n');
+  }
+
+  private void appendIndent(StringBuilder builder, int indent) {
+    for (int i = 0; i < indent; ++i) {
+      builder.append(' ');
+    }
   }
 
   private void renderLynxViewWithUrl(LynxView lynxView, String url) {
