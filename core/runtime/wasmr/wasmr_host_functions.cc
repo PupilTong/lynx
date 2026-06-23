@@ -951,6 +951,8 @@ constexpr const char kReplaceStyleSheetsTokensSymbol[] =
     "__ReplaceStyleSheetsTokens";
 constexpr const char kSetBackgroundColorRgbSymbol[] =
     "__SetBackgroundColorRgb";
+constexpr const char kCreateViewWithClassAndBackgroundColorRgbSymbol[] =
+    "__CreateViewWithClassAndBackgroundColorRgb";
 constexpr const char kGetStringAttributeByNameSymbol[] =
     "__GetStringAttributeByName";
 constexpr const char kGetEventTypeSymbol[] = "__GetEventType";
@@ -1331,6 +1333,11 @@ void ReplaceStyleSheetsTokensHostFunction(wasm_exec_env_t exec_env,
                                     kReplaceStyleSheetsTokensSymbol, true);
 }
 
+void ApplyBackgroundColorRgb(const ElementRef& element, uint32_t rgb) {
+  const uint32_t argb = 0xff000000u | (rgb & 0x00ffffffu);
+  element->SetStyle(tasm::kPropertyIDBackgroundColor, lepus::Value(argb));
+}
+
 void SetBackgroundColorRgbHostFunction(wasm_exec_env_t exec_env,
                                        uint64_t* raw_args) {
   constexpr const char* kFunction = kSetBackgroundColorRgbSymbol;
@@ -1341,9 +1348,53 @@ void SetBackgroundColorRgbHostFunction(wasm_exec_env_t exec_env,
     return;
   }
 
-  const uint32_t rgb = static_cast<uint32_t>(raw_args[1]) & 0x00ffffffu;
-  const uint32_t argb = 0xff000000u | rgb;
-  element->SetStyle(tasm::kPropertyIDBackgroundColor, lepus::Value(argb));
+  ApplyBackgroundColorRgb(element, static_cast<uint32_t>(raw_args[1]));
+}
+
+void CreateViewWithClassAndBackgroundColorRgbHostFunction(
+    wasm_exec_env_t exec_env, uint64_t* raw_args) {
+  constexpr const char* kFunction =
+      kCreateViewWithClassAndBackgroundColorRgbSymbol;
+  auto* context = GetEngineHostContext(exec_env);
+  if (context == nullptr) {
+    SetException(exec_env, ExceptionPrefix(kFunction) +
+                               " missing Lynx runtime context");
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+
+  bool ok = true;
+  std::string class_name =
+      ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[0]),
+                     static_cast<int32_t>(raw_args[1]), kFunction, &ok);
+  if (!ok) {
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+
+  lepus::Value args[] = {lepus::Value(0.0)};
+  lepus::Value result =
+      tasm::RendererFunctions::FiberCreateView(context, args, 1);
+  if (result.IsEmpty() || result.IsNil() || result.IsUndefined() ||
+      !result.IsRefCounted() ||
+      result.RefCounted()->GetRefType() != lepus::RefType::kElement) {
+    SetException(exec_env, ExceptionPrefix(kFunction) +
+                               " return value is not a FiberElement");
+    raw_args[0] = static_cast<uint32_t>(kNullHostRef);
+    return;
+  }
+
+  auto element =
+      fml::static_ref_ptr_cast<tasm::FiberElement>(result.RefCounted());
+  if (!class_name.empty()) {
+    tasm::ClassList old_classes = element->ReleaseClasses();
+    element->RemoveAllClass();
+    element->SetClass(base::String(std::move(class_name)));
+    element->OnClassChanged(old_classes, element->classes());
+  }
+  ApplyBackgroundColorRgb(element, static_cast<uint32_t>(raw_args[2]));
+  raw_args[0] =
+      static_cast<uint32_t>(StoreElementRef(exec_env, element, kFunction));
 }
 
 void SetIDHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
@@ -1807,6 +1858,9 @@ NativeSymbol g_engine_host_symbols[] = {
                   ReplaceStyleSheetsTokensHostFunction, SIG(WASM_STRING, "")),
     CUSTOM_SYMBOL(kSetBackgroundColorRgbSymbol, SetBackgroundColorRgbHostFunction,
                   SIG(WASM_REF WASM_I32, "")),
+    CUSTOM_SYMBOL(kCreateViewWithClassAndBackgroundColorRgbSymbol,
+                  CreateViewWithClassAndBackgroundColorRgbHostFunction,
+                  SIG(WASM_STRING WASM_I32, WASM_REF)),
     SYMBOL(kAddClassBinding, SIG(WASM_REF WASM_STRING, "")),
     SYMBOL(kSetClassesBinding, SIG(WASM_REF WASM_STRING, "")),
     CUSTOM_SYMBOL(tasm::kCFunctionGetClasses, GetClassesHostFunction,
