@@ -38,6 +38,20 @@ const ITEMS: ItemProps[] = [
       'file://lynx?local://showcase/rust-wasm/colorful-view.wasm?' +
       `${PERF_QUERY}&perf_label=WAMR_ColorfulView`,
   },
+  {
+    title: 'WAMR Dioxus',
+    description: 'Rust/Dioxus wasm32-wasip1 bundle optimized for WAMR',
+    url:
+      'file://lynx?local://showcase/rust-wasm/dioxus-react.wasm?' +
+      `${PERF_QUERY}&perf_label=WAMR_Dioxus`,
+  },
+  {
+    title: 'WAMR Dioxus ColorfulView',
+    description: 'Rust/Dioxus nested colorful view benchmark for WAMR',
+    url:
+      'file://lynx?local://showcase/rust-wasm/dioxus-colorful-view.wasm?' +
+      `${PERF_QUERY}&perf_label=WAMR_Dioxus_ColorfulView`,
+  },
 ];
 
 root.render(

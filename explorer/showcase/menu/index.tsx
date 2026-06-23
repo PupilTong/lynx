@@ -79,7 +79,7 @@ const ITEMS: ItemProps[] = [
   },
   {
     title: 'Rust Wasm',
-    description: 'Examples built with Yew and WAMR host bindings',
+    description: 'Examples built with Rust frontends and WAMR host bindings',
     url: 'file://lynx?local://showcase/menu/rustwasm.lynx.bundle',
   },
   {

@@ -15,8 +15,8 @@ sys.path.append(root_dir)
 
 # Define the Lynx example directory name
 LYNX_EXAMPLE_DIR_NAME = "@lynx-example"
-RUST_WASM_WORKSPACE_DIR = os.path.join(root_dir, "rust", "yew")
-RUST_WASM_TARGET_DIR = os.path.join(root_dir, "out", "rust_yew_wasm")
+YEW_WASM_WORKSPACE_DIR = os.path.join(root_dir, "rust", "yew")
+RUST_WASM_TARGET_DIR = os.path.join(root_dir, "out", "rust_wamr_wasm")
 RUST_WASM_SHOWCASE_DIR = "rust-wasm"
 RUST_WASM_EXAMPLES = [
     {
@@ -28,6 +28,16 @@ RUST_WASM_EXAMPLES = [
         "dir": os.path.join(root_dir, "rust", "yew", "examples", "colorful-view"),
         "package": "colorful-view-yew",
         "wasm_file": "colorful-view.wasm",
+    },
+    {
+        "dir": os.path.join(root_dir, "rust", "dioxus", "examples", "lynx-react"),
+        "package": "lynx-react",
+        "wasm_file": "dioxus-react.wasm",
+    },
+    {
+        "dir": os.path.join(root_dir, "rust", "dioxus", "examples", "lynx-colorful-view"),
+        "package": "lynx-colorful-view",
+        "wasm_file": "dioxus-colorful-view.wasm",
     },
 ]
 RUST_WASM_TARGET_FEATURES = ",".join([
@@ -74,8 +84,8 @@ def run_checked_command(command, cwd, env=None):
 def ensure_rust_wasm_workspace_manifest():
     generated_manifests = []
     for manifest_name in ["Cargo.toml", "Cargo.lock"]:
-        manifest_path = os.path.join(RUST_WASM_WORKSPACE_DIR, manifest_name)
-        backup_path = os.path.join(RUST_WASM_WORKSPACE_DIR,
+        manifest_path = os.path.join(YEW_WASM_WORKSPACE_DIR, manifest_name)
+        backup_path = os.path.join(YEW_WASM_WORKSPACE_DIR,
                                    f"{manifest_name}.backup")
         if os.path.exists(manifest_path):
             continue
