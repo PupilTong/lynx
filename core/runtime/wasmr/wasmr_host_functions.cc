@@ -949,6 +949,8 @@ constexpr const char kRemoveAttributeSymbol[] = "__RemoveAttribute";
 constexpr const char kAdoptStyleSheetTokensSymbol[] = "__AdoptStyleSheetTokens";
 constexpr const char kReplaceStyleSheetsTokensSymbol[] =
     "__ReplaceStyleSheetsTokens";
+constexpr const char kSetBackgroundColorRgbSymbol[] =
+    "__SetBackgroundColorRgb";
 constexpr const char kGetStringAttributeByNameSymbol[] =
     "__GetStringAttributeByName";
 constexpr const char kGetEventTypeSymbol[] = "__GetEventType";
@@ -1327,6 +1329,21 @@ void ReplaceStyleSheetsTokensHostFunction(wasm_exec_env_t exec_env,
                                           uint64_t* raw_args) {
   ApplyStyleSheetTokensHostFunction(exec_env, raw_args,
                                     kReplaceStyleSheetsTokensSymbol, true);
+}
+
+void SetBackgroundColorRgbHostFunction(wasm_exec_env_t exec_env,
+                                       uint64_t* raw_args) {
+  constexpr const char* kFunction = kSetBackgroundColorRgbSymbol;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  if (!ok) {
+    return;
+  }
+
+  const uint32_t rgb = static_cast<uint32_t>(raw_args[1]) & 0x00ffffffu;
+  const uint32_t argb = 0xff000000u | rgb;
+  element->SetStyle(tasm::kPropertyIDBackgroundColor, lepus::Value(argb));
 }
 
 void SetIDHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
@@ -1788,6 +1805,8 @@ NativeSymbol g_engine_host_symbols[] = {
                   SIG(WASM_STRING, "")),
     CUSTOM_SYMBOL(kReplaceStyleSheetsTokensSymbol,
                   ReplaceStyleSheetsTokensHostFunction, SIG(WASM_STRING, "")),
+    CUSTOM_SYMBOL(kSetBackgroundColorRgbSymbol, SetBackgroundColorRgbHostFunction,
+                  SIG(WASM_REF WASM_I32, "")),
     SYMBOL(kAddClassBinding, SIG(WASM_REF WASM_STRING, "")),
     SYMBOL(kSetClassesBinding, SIG(WASM_REF WASM_STRING, "")),
     CUSTOM_SYMBOL(tasm::kCFunctionGetClasses, GetClassesHostFunction,
