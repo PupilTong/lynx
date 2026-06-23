@@ -69,6 +69,7 @@ public class LynxViewShellActivity extends AppCompatActivity {
   private static final String DEFAULT_TOP_BAR_BACK_BUTTON_STYLE = "light";
   private static final String PERF_OVERLAY_PARAM = "perf_overlay";
   private static final String PERF_LABEL_PARAM = "perf_label";
+  private static final String THREAD_MODE_PARAM = "thread_mode";
   private ViewGroup mLynxContainer;
   private LynxView mLynxView;
   private String mFrontendTheme;
@@ -275,6 +276,11 @@ public class LynxViewShellActivity extends AppCompatActivity {
     }
     if (queryMap.contains("density")) {
       builder.setDensity(queryMap.getFloat("density", 320) / 160.f);
+    }
+    if (queryMap.contains(THREAD_MODE_PARAM)) {
+      builder.setThreadStrategyForRendering(
+          queryMap.getInt(THREAD_MODE_PARAM, 0) == 0 ? ThreadStrategyForRendering.ALL_ON_UI
+                                                     : ThreadStrategyForRendering.MOST_ON_TASM);
     }
 
     if (queryMap.contains("orientation")) {

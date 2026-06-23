@@ -15,12 +15,21 @@ sys.path.append(root_dir)
 
 # Define the Lynx example directory name
 LYNX_EXAMPLE_DIR_NAME = "@lynx-example"
-RUST_WASM_EXAMPLE_DIR = os.path.join(root_dir, "rust", "yew", "examples",
-                                     "react")
 RUST_WASM_WORKSPACE_DIR = os.path.join(root_dir, "rust", "yew")
 RUST_WASM_TARGET_DIR = os.path.join(root_dir, "out", "rust_yew_wasm")
-RUST_WASM_FILE_NAME = "react.wasm"
 RUST_WASM_SHOWCASE_DIR = "rust-wasm"
+RUST_WASM_EXAMPLES = [
+    {
+        "dir": os.path.join(root_dir, "rust", "yew", "examples", "react"),
+        "package": "react-lynx-yew",
+        "wasm_file": "react.wasm",
+    },
+    {
+        "dir": os.path.join(root_dir, "rust", "yew", "examples", "colorful-view"),
+        "package": "colorful-view-yew",
+        "wasm_file": "colorful-view.wasm",
+    },
+]
 RUST_WASM_TARGET_FEATURES = ",".join([
     "+bulk-memory",
     "+bulk-memory-opt",
@@ -88,11 +97,12 @@ def remove_generated_file(path, existed_before):
         os.remove(path)
 
 
-def build_rust_wasm_file():
+def build_rust_wasm_file(example):
     print("========== build Rust WAMR showcase ==========")
-    if not os.path.exists(RUST_WASM_EXAMPLE_DIR):
+    example_dir = example["dir"]
+    if not os.path.exists(example_dir):
         raise FileNotFoundError(
-            f"Rust wasm example directory not found: {RUST_WASM_EXAMPLE_DIR}")
+            f"Rust wasm example directory not found: {example_dir}")
 
     env = os.environ.copy()
     rustflags = f"-C target-feature={RUST_WASM_TARGET_FEATURES}"
@@ -103,7 +113,7 @@ def build_rust_wasm_file():
     env.update(RUST_WASM_RELEASE_PROFILE)
     env["CARGO_TARGET_DIR"] = RUST_WASM_TARGET_DIR
 
-    example_lock_path = os.path.join(RUST_WASM_EXAMPLE_DIR, "Cargo.lock")
+    example_lock_path = os.path.join(example_dir, "Cargo.lock")
     example_lock_existed = os.path.exists(example_lock_path)
     generated_manifests = ensure_rust_wasm_workspace_manifest()
     try:
@@ -111,20 +121,21 @@ def build_rust_wasm_file():
             "cargo",
             "build",
             "--manifest-path",
-            os.path.join(RUST_WASM_EXAMPLE_DIR, "Cargo.toml"),
+            os.path.join(example_dir, "Cargo.toml"),
             "--target",
             "wasm32-wasip1",
             "--release",
-        ], RUST_WASM_EXAMPLE_DIR, env)
+        ], example_dir, env)
     finally:
         remove_generated_workspace_manifests(generated_manifests)
         remove_generated_file(example_lock_path, example_lock_existed)
 
     release_dir = os.path.join(RUST_WASM_TARGET_DIR, "wasm32-wasip1",
                                "release")
+    package_name = example["package"]
     wasm_candidates = [
-        os.path.join(release_dir, "react-lynx-yew.wasm"),
-        os.path.join(release_dir, "react_lynx_yew.wasm"),
+        os.path.join(release_dir, f"{package_name}.wasm"),
+        os.path.join(release_dir, f"{package_name.replace('-', '_')}.wasm"),
     ]
     for candidate in wasm_candidates:
         if os.path.exists(candidate):
@@ -134,20 +145,21 @@ def build_rust_wasm_file():
         raise FileNotFoundError(
             f"Unable to find Rust wasm output in {release_dir}")
 
-    optimized_wasm = os.path.join(release_dir, RUST_WASM_FILE_NAME)
+    optimized_wasm = os.path.join(release_dir, example["wasm_file"])
     run_checked_command(
         ["wasm-opt", *WASM_OPT_FLAGS, source_wasm, "-o", optimized_wasm],
-        RUST_WASM_EXAMPLE_DIR)
+        example_dir)
     return optimized_wasm
 
 
-def copy_rust_wasm_file(wasm_file, showcase_dirs):
+def copy_rust_wasm_files(wasm_files, showcase_dirs):
     print("========== copy Rust WAMR showcase ==========")
     for showcase_dir in showcase_dirs:
         rust_wasm_dir = os.path.join(showcase_dir, RUST_WASM_SHOWCASE_DIR)
         os.makedirs(rust_wasm_dir, exist_ok=True)
-        shutil.copy(wasm_file, os.path.join(rust_wasm_dir,
-                                            RUST_WASM_FILE_NAME))
+        for wasm_file in wasm_files:
+            shutil.copy(wasm_file,
+                        os.path.join(rust_wasm_dir, os.path.basename(wasm_file)))
 
 
 def resolve_pnpm_runner():
@@ -242,7 +254,9 @@ def main():
     # Install dependencies and build
     run_pnpm_command(["pnpm", "install", "--frozen-lockfile"], os.getcwd())
     run_pnpm_command(["pnpm", "run", "build"], os.getcwd())
-    rust_wasm_file = build_rust_wasm_file()
+    rust_wasm_files = [
+        build_rust_wasm_file(example) for example in RUST_WASM_EXAMPLES
+    ]
 
     print("========== copy showcase resource ==========")
     # Copy resources from node_modules
@@ -292,7 +306,7 @@ def main():
             shutil.copy(os.path.join(menu_dist_dir, filename), menu_windows)
             shutil.copy(os.path.join(menu_dist_dir, filename), menu_macos)
 
-    copy_rust_wasm_file(rust_wasm_file, showcase_dirs)
+    copy_rust_wasm_files(rust_wasm_files, showcase_dirs)
 
 
 if __name__ == "__main__":
