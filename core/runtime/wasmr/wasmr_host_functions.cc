@@ -945,6 +945,7 @@ BINDING(kGetElementByUniqueIDBinding, tasm::kCFunctionGetElementByUniqueID,
 constexpr const char kDropElementBindingSymbol[] = "binding__DropElement";
 constexpr const char kDropEventBindingSymbol[] = "binding__DropEvent";
 constexpr const char kSetStringAttributeSymbol[] = "__SetStringAttribute";
+constexpr const char kSetInlineStyleTextSymbol[] = "__SetInlineStyleText";
 constexpr const char kRemoveAttributeSymbol[] = "__RemoveAttribute";
 constexpr const char kAdoptStyleSheetTokensSymbol[] = "__AdoptStyleSheetTokens";
 constexpr const char kReplaceStyleSheetsTokensSymbol[] =
@@ -1208,11 +1209,25 @@ void SetStringAttributeHostFunction(wasm_exec_env_t exec_env,
     return;
   }
   if (key == kStyleAttribute) {
-    element->RemoveAllInlineStyles();
-    element->SetRawInlineStyles(base::String(value));
+    element->SetRawInlineStyles(base::String(std::move(value)));
     return;
   }
   element->SetAttribute(base::String(key), lepus::Value(value));
+}
+
+void SetInlineStyleTextHostFunction(wasm_exec_env_t exec_env,
+                                    uint64_t* raw_args) {
+  constexpr const char* kFunction = kSetInlineStyleTextSymbol;
+  bool ok = true;
+  auto element = GetElementRef(exec_env, static_cast<int32_t>(raw_args[0]),
+                               kFunction, &ok);
+  std::string value =
+      ReadUtf8String(exec_env, static_cast<int32_t>(raw_args[1]),
+                     static_cast<int32_t>(raw_args[2]), kFunction, &ok);
+  if (!ok) {
+    return;
+  }
+  element->SetRawInlineStyles(base::String(std::move(value)));
 }
 
 void RemoveAttributeHostFunction(wasm_exec_env_t exec_env, uint64_t* raw_args) {
@@ -1782,6 +1797,8 @@ NativeSymbol g_engine_host_symbols[] = {
     SYMBOL(kGetTagBinding, SIG(WASM_REF WASM_STRING_OUT, WASM_I32)),
     CUSTOM_SYMBOL(kSetStringAttributeSymbol, SetStringAttributeHostFunction,
                   SIG(WASM_REF WASM_STRING WASM_STRING, "")),
+    CUSTOM_SYMBOL(kSetInlineStyleTextSymbol, SetInlineStyleTextHostFunction,
+                  SIG(WASM_REF WASM_STRING, "")),
     CUSTOM_SYMBOL(kRemoveAttributeSymbol, RemoveAttributeHostFunction,
                   SIG(WASM_REF WASM_STRING, "")),
     CUSTOM_SYMBOL(kAdoptStyleSheetTokensSymbol, AdoptStyleSheetTokensHostFunction,
