@@ -28,6 +28,7 @@
 #include "core/renderer/dom/fiber/block_element.h"
 #include "core/renderer/dom/fiber/fiber_element.h"
 #include "core/renderer/dom/selector/fiber_element_selector.h"
+#include "core/renderer/css/css_value.h"
 #include "core/renderer/css/wasm/css_token_stream_view.h"
 #include "core/renderer/css/wasm/wasm_stylesheet_parser.h"
 #include "core/renderer/utils/base/tasm_constants.h"
@@ -1335,7 +1336,9 @@ void ReplaceStyleSheetsTokensHostFunction(wasm_exec_env_t exec_env,
 
 void ApplyBackgroundColorRgb(const ElementRef& element, uint32_t rgb) {
   const uint32_t argb = 0xff000000u | (rgb & 0x00ffffffu);
-  element->SetStyle(tasm::kPropertyIDBackgroundColor, lepus::Value(argb));
+  element->CacheStyleFromAttributes(
+      tasm::kPropertyIDBackgroundColor,
+      tasm::CSSValue(argb, tasm::CSSValuePattern::NUMBER));
 }
 
 void SetBackgroundColorRgbHostFunction(wasm_exec_env_t exec_env,
