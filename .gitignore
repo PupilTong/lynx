@@ -111,6 +111,7 @@ ruby/
 
 # JSLibrary
 node_modules
+.pnpm-store/
 js_libraries/**/dist/
 js_libraries/**/__dist__
 js_libraries/**/output/
