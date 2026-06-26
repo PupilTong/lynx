@@ -1,0 +1,11 @@
+[package]
+name = "lynx-cpp-bridge"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "Apache-2.0"
+description = "Runtime-loaded C++ bridge bindings for Lynx windowless/headless embedding."
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
