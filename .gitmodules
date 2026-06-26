@@ -7,3 +7,6 @@
 [submodule "third_party/simde"]
 	path = third_party/simde
 	url = https://github.com/simd-everywhere/simde.git
+[submodule "rust/dioxus"]
+	path = rust/dioxus
+	url = https://github.com/PupilTong/dioxus.git

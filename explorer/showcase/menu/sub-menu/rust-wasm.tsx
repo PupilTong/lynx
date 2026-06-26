@@ -18,6 +18,16 @@ const ITEMS: ItemProps[] = [
     description: 'Nested colorful view benchmark compiled from Rust/Yew',
     url: 'file://lynx?local://showcase/rust-wasm/colorful-view.wasm',
   },
+  {
+    title: 'React Lynx Dioxus',
+    description: 'A Dioxus example compiled to wasm32-wasip1 for WAMR',
+    url: 'file://lynx?local://showcase/rust-wasm/dioxus-react.wasm',
+  },
+  {
+    title: 'ColorfulView Dioxus',
+    description: 'Nested colorful view benchmark compiled from Rust/Dioxus',
+    url: 'file://lynx?local://showcase/rust-wasm/dioxus-colorful-view.wasm',
+  },
 ];
 
 root.render(
