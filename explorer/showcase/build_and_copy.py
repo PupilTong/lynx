@@ -15,7 +15,7 @@ sys.path.append(root_dir)
 
 # Define the Lynx example directory name
 LYNX_EXAMPLE_DIR_NAME = "@lynx-example"
-YEW_WASM_WORKSPACE_DIR = os.path.join(root_dir, "rust", "yew")
+RUST_WASM_WORKSPACE_DIR = os.path.join(root_dir, "rust", "yew")
 RUST_WASM_TARGET_DIR = os.path.join(root_dir, "out", "rust_wamr_wasm")
 RUST_WASM_SHOWCASE_DIR = "rust-wasm"
 RUST_WASM_EXAMPLES = [
@@ -84,8 +84,8 @@ def run_checked_command(command, cwd, env=None):
 def ensure_rust_wasm_workspace_manifest():
     generated_manifests = []
     for manifest_name in ["Cargo.toml", "Cargo.lock"]:
-        manifest_path = os.path.join(YEW_WASM_WORKSPACE_DIR, manifest_name)
-        backup_path = os.path.join(YEW_WASM_WORKSPACE_DIR,
+        manifest_path = os.path.join(RUST_WASM_WORKSPACE_DIR, manifest_name)
+        backup_path = os.path.join(RUST_WASM_WORKSPACE_DIR,
                                    f"{manifest_name}.backup")
         if os.path.exists(manifest_path):
             continue
